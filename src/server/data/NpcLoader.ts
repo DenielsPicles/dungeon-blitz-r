@@ -25,8 +25,52 @@ export interface NpcDef {
 export class NpcLoader {
     private static levelsFiltered: Map<string, NpcDef[]> = new Map();
     private static levelsRaw: Map<string, NpcDef[]> = new Map();
+    private static readonly SERVER_HOSTILE_LEVELS = new Set<string>([
+        'GoblinRiverDungeon',
+        'GoblinRiverDungeonHard'
+    ]);
+
+    private static normalizeLevelName(levelName: string): string {
+        return String(levelName ?? '').trim();
+    }
+
+    private static resolveFallbackLevelName(levelName: string): string | null {
+        const normalizedLevel = this.normalizeLevelName(levelName);
+        if (!normalizedLevel.endsWith('Hard')) {
+            return null;
+        }
+
+        const baseLevel = normalizedLevel.slice(0, -4);
+        return this.levelsRaw.has(baseLevel) ? baseLevel : null;
+    }
+
+    private static cloneNpcDef(npc: NpcDef): NpcDef {
+        return {
+            ...npc,
+            buffs: Array.isArray(npc?.buffs) ? [...npc.buffs] : []
+        };
+    }
+
+    private static getLevelNpcList(source: Map<string, NpcDef[]>, levelName: string): NpcDef[] {
+        const normalizedLevel = this.normalizeLevelName(levelName);
+        const direct = source.get(normalizedLevel);
+        if (direct) {
+            return direct.map((npc) => this.cloneNpcDef(npc));
+        }
+
+        const fallbackLevel = this.resolveFallbackLevelName(normalizedLevel);
+        if (!fallbackLevel) {
+            return [];
+        }
+
+        return (source.get(fallbackLevel) ?? []).map((npc) => this.cloneNpcDef(npc));
+    }
 
     private static filterLevelNpcs(levelName: string, npcs: any[]): any[] {
+        if (this.SERVER_HOSTILE_LEVELS.has(this.normalizeLevelName(levelName))) {
+            return npcs;
+        }
+
         // Match the Python server: client SWFs already own hostile spawns and
         // some tutorial actors, so only keep server-authored friendly/scripted NPCs.
         let filtered = npcs.filter((npc) => Number(npc?.team ?? 0) !== 2);
@@ -105,10 +149,10 @@ export class NpcLoader {
     }
 
     static getNpcsForLevel(levelName: string): NpcDef[] {
-        return this.levelsFiltered.get(levelName) || [];
+        return this.getLevelNpcList(this.levelsFiltered, levelName);
     }
 
     static getRawNpcsForLevel(levelName: string): NpcDef[] {
-        return this.levelsRaw.get(levelName) || [];
+        return this.getLevelNpcList(this.levelsRaw, levelName);
     }
 }

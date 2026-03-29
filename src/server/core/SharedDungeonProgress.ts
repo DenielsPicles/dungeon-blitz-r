@@ -99,6 +99,24 @@ export function resolveSharedDungeonProgressAuthorityToken(levelScope: string | 
     return normalizeAuthorityToken(getSharedDungeonProgressState(scopeKey)?.authorityToken);
 }
 
+export function hasSharedDungeonProgressHostiles(levelScope: string | null | undefined): boolean {
+    const scopeKey = String(levelScope ?? '').trim();
+    if (!scopeKey) {
+        return false;
+    }
+
+    const levelMap = GlobalState.levelEntities.get(scopeKey);
+    for (const entity of levelMap?.values() ?? []) {
+        if (!entity || entity.isPlayer || Number(entity.team ?? 0) !== 2) {
+            continue;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
 export function setSharedDungeonProgressState(
     levelScope: string | null | undefined,
     progress: number,

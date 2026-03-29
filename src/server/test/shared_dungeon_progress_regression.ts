@@ -132,8 +132,7 @@ async function testGoblinRiverQuestProgressFollowsHostileOwnerAuthority(): Promi
                 isPlayer: false,
                 team: 2,
                 entState: 0,
-                clientSpawned: true,
-                ownerToken: authority.token,
+                clientSpawned: false,
                 roomId: 1
             }
         ]
@@ -141,26 +140,11 @@ async function testGoblinRiverQuestProgressFollowsHostileOwnerAuthority(): Promi
 
     await LevelHandler.handleQuestProgressUpdate(joiner as never, createQuestProgressPacket(100));
 
-    assert.equal(joiner.character.questTrackerState, 0, 'non-authority joiner progress should be ignored until the hostile owner updates');
-    assert.equal(authority.character.questTrackerState, 0, 'authority should not inherit the joiner’s false completion');
+    assert.equal(joiner.character.questTrackerState, 100, 'shared server hostile dungeons should accept progress from any viewer');
+    assert.equal(authority.character.questTrackerState, 100, 'the canonical progress should broadcast to every party member');
     assert.deepEqual(
         joiner.sentPackets.filter((packet) => packet.id === 0xB7).map((packet) => parseQuestProgress(packet.payload)),
-        [0],
-        'joiner should be corrected back to the shared dungeon progress'
-    );
-
-    await LevelHandler.handleQuestProgressUpdate(authority as never, createQuestProgressPacket(42));
-
-    assert.equal(authority.character.questTrackerState, 42);
-    assert.equal(joiner.character.questTrackerState, 42);
-    assert.deepEqual(
-        authority.sentPackets.filter((packet) => packet.id === 0xB7).map((packet) => parseQuestProgress(packet.payload)).slice(-1),
-        [42],
-        'authority update should set the canonical shared progress'
-    );
-    assert.deepEqual(
-        joiner.sentPackets.filter((packet) => packet.id === 0xB7).map((packet) => parseQuestProgress(packet.payload)).slice(-1),
-        [42],
+        [100],
         'joiner should receive the canonical shared progress update'
     );
 }
@@ -180,8 +164,7 @@ async function testGoblinRiverLevelCompleteWaitsForSharedProgressCompletion(): P
                 isPlayer: false,
                 team: 2,
                 entState: 0,
-                clientSpawned: true,
-                ownerToken: authority.token,
+                clientSpawned: false,
                 roomId: 1
             }
         ]
@@ -192,16 +175,16 @@ async function testGoblinRiverLevelCompleteWaitsForSharedProgressCompletion(): P
     assert.equal(
         joiner.sentPackets.some((packet) => packet.id === 0x87),
         false,
-        'non-authority joiner should not complete the dungeon while the shared progress is incomplete'
+        'the dungeon should not complete before shared progress reaches 100%'
     );
 
-    await LevelHandler.handleQuestProgressUpdate(authority as never, createQuestProgressPacket(100));
+    await LevelHandler.handleQuestProgressUpdate(joiner as never, createQuestProgressPacket(100));
     await MissionHandler.handleSetLevelComplete(authority as never, createLevelCompletePacket());
 
     assert.equal(
         authority.sentPackets.some((packet) => packet.id === 0x87),
         true,
-        'authority should complete the dungeon once the shared progress reaches 100%'
+        'any player should be able to complete the dungeon once shared progress reaches 100%'
     );
     assert.deepEqual(
         joiner.sentPackets.filter((packet) => packet.id === 0xB7).map((packet) => parseQuestProgress(packet.payload)).slice(-1),

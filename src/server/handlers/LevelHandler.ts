@@ -24,6 +24,7 @@ import { TransferTokenAllocator } from '../core/TransferTokenAllocator';
 import { areClientsInSameParty, getPartyIdForClient, sharesRoomIds } from '../core/PartySync';
 import {
     getOrCreateSharedDungeonProgressState,
+    hasSharedDungeonProgressHostiles,
     resolveSharedDungeonProgressAuthorityToken,
     setSharedDungeonProgressState,
     usesSharedDungeonProgress
@@ -2507,15 +2508,24 @@ export class LevelHandler {
         if (usesSharedDungeonProgress(currentLevel) && levelScope) {
             const sharedState = getOrCreateSharedDungeonProgressState(levelScope);
             if (sharedState) {
+                if (!hasSharedDungeonProgressHostiles(levelScope)) {
+                    progress = 0;
+                } else {
                 const liveAuthorityToken = resolveSharedDungeonProgressAuthorityToken(levelScope);
                 if (liveAuthorityToken > 0) {
                     sharedState.authorityToken = liveAuthorityToken;
                 }
 
-                progress = sharedState.progress;
-                if (sharedState.authorityToken > 0 && client.token === sharedState.authorityToken) {
-                    progress = Math.max(sharedState.progress, requestedProgress);
-                    setSharedDungeonProgressState(levelScope, progress, sharedState.authorityToken);
+                    progress = sharedState.progress;
+                    if (sharedState.authorityToken > 0) {
+                        if (client.token === sharedState.authorityToken) {
+                            progress = Math.max(sharedState.progress, requestedProgress);
+                            setSharedDungeonProgressState(levelScope, progress, sharedState.authorityToken);
+                        }
+                    } else {
+                        progress = Math.max(sharedState.progress, requestedProgress);
+                        setSharedDungeonProgressState(levelScope, progress);
+                    }
                 }
             } else {
                 progress = 0;

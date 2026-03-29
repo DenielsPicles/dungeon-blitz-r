@@ -4,6 +4,7 @@ import { LevelConfig } from '../core/LevelConfig';
 import { getClientLevelScope } from '../core/LevelScope';
 import {
     getOrCreateSharedDungeonProgressState,
+    hasSharedDungeonProgressHostiles,
     resolveSharedDungeonProgressAuthorityToken,
     setSharedDungeonProgressState,
     usesSharedDungeonProgress
@@ -24,6 +25,7 @@ export class MissionHandler {
     private static readonly MISSION_IN_PROGRESS = 1;
     private static readonly MISSION_READY_TO_TURN_IN = 2;
     private static readonly MISSION_CLAIMED = 3;
+    private static readonly ACHIEVEMENT_MAMMOTH_IDOL_REWARD = 10;
     private static readonly LOGIN_SYNC_MISSION_IDS = new Set<number>([
         MissionID.DefendTheShip,
         MissionID.MeetTheTown,
@@ -170,19 +172,20 @@ export class MissionHandler {
         if (usesSharedDungeonProgress(currentLevel) && levelScope) {
             const sharedState = getOrCreateSharedDungeonProgressState(levelScope);
             if (sharedState) {
+                if (sharedState.progress < 100) {
+                    if (!hasSharedDungeonProgressHostiles(levelScope)) {
+                        return;
+                    }
+                    return;
+                }
+
                 const liveAuthorityToken = resolveSharedDungeonProgressAuthorityToken(levelScope);
                 if (liveAuthorityToken > 0) {
                     sharedState.authorityToken = liveAuthorityToken;
                 }
 
-                const isAuthority = sharedState.authorityToken > 0 && client.token === sharedState.authorityToken;
-                if (sharedState.progress < 100) {
-                    if (!isAuthority || completionPercent < 100) {
-                        return;
-                    }
-
-                    setSharedDungeonProgressState(levelScope, 100, sharedState.authorityToken);
-                    MissionHandler.broadcastSharedDungeonQuestProgress(levelScope, 100);
+                if (sharedState.authorityToken > 0 && client.token !== sharedState.authorityToken) {
+                    return;
                 }
             }
         }
@@ -305,7 +308,10 @@ export class MissionHandler {
             { currCount: Math.max(1, Number(missionDef.CompleteCount ?? 1)) }
         );
 
+        client.character.mammothIdols = Number(client.character.mammothIdols ?? 0) + MissionHandler.ACHIEVEMENT_MAMMOTH_IDOL_REWARD;
+
         MissionHandler.sendMissionProgress(client, missionId, 1);
+        MissionHandler.sendMammothIdolUpdate(client);
         MissionHandler.sendAchievementCompleteUi(client, missionId);
         await MissionHandler.saveCharacter(client);
     }
@@ -514,6 +520,18 @@ export class MissionHandler {
         bb.writeMethod4(missionId);
         bb.writeMethod11(0, 1);
         client.sendBitBuffer(0x84, bb);
+    }
+
+    private static sendMammothIdolUpdate(client: Client): void {
+        if (!client.character) {
+            return;
+        }
+
+        const bb = new BitBuffer(false);
+        bb.writeMethod4(Number(client.character.mammothIdols ?? 0));
+        bb.writeMethod4(0);
+        bb.writeMethod11(client.character.showHigher ? 1 : 0, 1);
+        client.sendBitBuffer(0xA1, bb);
     }
 
     private static sendDungeonComplete(

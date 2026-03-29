@@ -17,8 +17,6 @@ export class EntityHandler {
         'CraftTown',
         'NewbieRoad',
         'NewbieRoadHard',
-        'GoblinRiverDungeon',
-        'GoblinRiverDungeonHard',
         'SwampRoadNorth',
         'SwampRoadNorthHard',
         'SwampRoadConnection',
@@ -40,6 +38,10 @@ export class EntityHandler {
     ]);
     private static readonly MOUNT_SYNC_RETRY_DELAYS_MS = [0, 300, 1200, 2500, 4000];
     private static readonly CLIENT_SPAWN_JOINER_SEED_DELAYS_MS = [2500, 4500];
+    private static readonly SERVER_AUTHORITATIVE_DUNGEON_LEVELS = new Set<string>([
+        'GoblinRiverDungeon',
+        'GoblinRiverDungeonHard'
+    ]);
 
     private static normalizeIdentityName(value: unknown): string {
         return String(value ?? '')
@@ -50,6 +52,10 @@ export class EntityHandler {
 
     private static usesClientSpawn(levelName: string): boolean {
         return EntityHandler.CLIENT_SPAWN_LEVELS.has(levelName);
+    }
+
+    private static usesServerAuthoritativeDungeonSpawns(levelName: string | null | undefined): boolean {
+        return Boolean(levelName) && EntityHandler.SERVER_AUTHORITATIVE_DUNGEON_LEVELS.has(String(levelName));
     }
 
     private static isPrivateClientSpawnOutdoorEntity(levelName: string | null | undefined, entity: any): boolean {
@@ -128,6 +134,68 @@ export class EntityHandler {
 
     private static isPartySharedClientSpawnHostile(levelName: string | null | undefined, entity: any): boolean {
         return EntityHandler.isSharedClientSpawnRegionActor(levelName, entity) && Number(entity?.team ?? 0) === 2;
+    }
+
+    private static findServerAuthoritativeSpawnMatch(
+        levelMap: Map<number, any> | null,
+        entity: any
+    ): any | null {
+        if (!levelMap || !entity || entity.isPlayer) {
+            return null;
+        }
+
+        const targetName = EntityHandler.normalizeIdentityName(entity.name);
+        const targetTeam = Number(entity.team ?? 0);
+        let bestMatch: any | null = null;
+        let bestDistanceSq = Number.POSITIVE_INFINITY;
+
+        for (const candidate of levelMap.values()) {
+            if (!candidate || candidate.isPlayer) {
+                continue;
+            }
+            if (Number(candidate.team ?? 0) !== targetTeam) {
+                continue;
+            }
+            if (EntityHandler.normalizeIdentityName(candidate.name) !== targetName) {
+                continue;
+            }
+
+            const dx = Number(candidate.x ?? 0) - Number(entity.x ?? 0);
+            const dy = Number(candidate.y ?? 0) - Number(entity.y ?? 0);
+            const distanceSq = (dx * dx) + (dy * dy);
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestMatch = candidate;
+            }
+        }
+
+        return bestMatch;
+    }
+
+    private static suppressServerAuthoritativeDungeonSpawn(
+        client: Client,
+        levelName: string | null | undefined,
+        levelMap: Map<number, any> | null,
+        entity: any
+    ): boolean {
+        if (
+            !EntityHandler.usesServerAuthoritativeDungeonSpawns(levelName) ||
+            !entity ||
+            entity.isPlayer ||
+            (Number(entity.team ?? 0) !== 2 && Number(entity.team ?? 0) !== 3)
+        ) {
+            return false;
+        }
+
+        const canonical =
+            (levelMap && levelMap.get(Number(entity.id ?? 0))) ??
+            EntityHandler.findServerAuthoritativeSpawnMatch(levelMap, entity);
+
+        EntityHandler.sendDestroyEntity(client, Number(entity.id ?? 0));
+        if (canonical) {
+            EntityHandler.ensureEntityKnown(client, String(levelName ?? ''), Number(canonical.id ?? 0));
+        }
+        return true;
     }
 
     private static getSharedClientSpawnOwnerPartyId(entity: any): number {
@@ -1161,6 +1229,10 @@ export class EntityHandler {
             return;
         }
 
+        if (EntityHandler.suppressServerAuthoritativeDungeonSpawn(client, levelName, levelMap, props)) {
+            return;
+        }
+
         if (!isPlayer && levelName && DebugConfig.enabled) {
             console.log(`[EntityHandler] Non-player entity ACCEPTED: id=${entityId} name=${entName} team=${team} from ${client.character?.name} in ${levelName} scope=${getClientLevelScope(client)} levelMap.size=${levelMap?.size ?? 'null'}`);
         }
@@ -1204,7 +1276,10 @@ export class EntityHandler {
                 console.log(`[EntityHandler] Initializing ${npcs.length} NPCs for ${levelName}`);
 
                 for (const npc of npcs) {
-                    const entityProps = Entity.fromNpc(npc);
+                    const entityProps = {
+                        ...Entity.fromNpc(npc),
+                        clientSpawned: false
+                    };
                     levelMap.set(npc.id, entityProps);
                 }
             }
