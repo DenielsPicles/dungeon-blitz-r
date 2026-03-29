@@ -27,6 +27,25 @@ export function getPartyIdForClient(client: Pick<Client, 'character'> | null | u
     return Number(GlobalState.partyByMember.get(key) ?? 0);
 }
 
+export function getPartyLeaderCharacterKeyForClient(client: Pick<Client, 'character'> | null | undefined): string {
+    const partyId = getPartyIdForClient(client);
+    if (partyId <= 0) {
+        return '';
+    }
+
+    const group = GlobalState.partyGroups.get(partyId);
+    return normalizeCharacterKey(group?.leader);
+}
+
+export function isClientPartyLeader(client: Pick<Client, 'character'> | null | undefined): boolean {
+    const clientKey = getClientCharacterKey(client);
+    if (!clientKey) {
+        return false;
+    }
+
+    return clientKey === getPartyLeaderCharacterKeyForClient(client);
+}
+
 export function areClientsInSameParty(
     left: Pick<Client, 'character'> | null | undefined,
     right: Pick<Client, 'character'> | null | undefined

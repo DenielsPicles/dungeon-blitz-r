@@ -8,7 +8,7 @@ import { Entity, EntityProps, EntityState } from '../core/Entity';
 import { LevelConfig } from '../core/LevelConfig';
 import { PetHandler } from './PetHandler';
 import { BuildingHandler } from './BuildingHandler';
-import { areClientsInSameParty, getPartyIdForClient, sharesRoomIds } from '../core/PartySync';
+import { areClientsInSameParty, getPartyIdForClient, isClientPartyLeader, sharesRoomIds } from '../core/PartySync';
 import { areClientsInSameLevelScope, getClientLevelScope, getLevelScopeKey } from '../core/LevelScope';
 
 export class EntityHandler {
@@ -17,6 +17,8 @@ export class EntityHandler {
         'CraftTown',
         'NewbieRoad',
         'NewbieRoadHard',
+        'GoblinRiverDungeon',
+        'GoblinRiverDungeonHard',
         'SwampRoadNorth',
         'SwampRoadNorthHard',
         'SwampRoadConnection',
@@ -38,7 +40,7 @@ export class EntityHandler {
     ]);
     private static readonly MOUNT_SYNC_RETRY_DELAYS_MS = [0, 300, 1200, 2500, 4000];
     private static readonly CLIENT_SPAWN_JOINER_SEED_DELAYS_MS = [2500, 4500];
-    private static readonly SERVER_AUTHORITATIVE_DUNGEON_LEVELS = new Set<string>([
+    private static readonly LEADER_AUTHORITATIVE_CLIENT_SPAWN_LEVELS = new Set<string>([
         'GoblinRiverDungeon',
         'GoblinRiverDungeonHard'
     ]);
@@ -54,8 +56,8 @@ export class EntityHandler {
         return EntityHandler.CLIENT_SPAWN_LEVELS.has(levelName);
     }
 
-    private static usesServerAuthoritativeDungeonSpawns(levelName: string | null | undefined): boolean {
-        return Boolean(levelName) && EntityHandler.SERVER_AUTHORITATIVE_DUNGEON_LEVELS.has(String(levelName));
+    private static usesLeaderAuthoritativeClientSpawns(levelName: string | null | undefined): boolean {
+        return Boolean(levelName) && EntityHandler.LEADER_AUTHORITATIVE_CLIENT_SPAWN_LEVELS.has(String(levelName));
     }
 
     private static isPrivateClientSpawnOutdoorEntity(levelName: string | null | undefined, entity: any): boolean {
@@ -136,7 +138,7 @@ export class EntityHandler {
         return EntityHandler.isSharedClientSpawnRegionActor(levelName, entity) && Number(entity?.team ?? 0) === 2;
     }
 
-    private static findServerAuthoritativeSpawnMatch(
+    private static findLeaderAuthoritativeClientSpawnMatch(
         levelMap: Map<number, any> | null,
         entity: any
     ): any | null {
@@ -172,24 +174,27 @@ export class EntityHandler {
         return bestMatch;
     }
 
-    private static suppressServerAuthoritativeDungeonSpawn(
+    private static suppressFollowerLeaderAuthoritativeDungeonSpawn(
         client: Client,
         levelName: string | null | undefined,
         levelMap: Map<number, any> | null,
         entity: any
     ): boolean {
+        const partyId = getPartyIdForClient(client);
         if (
-            !EntityHandler.usesServerAuthoritativeDungeonSpawns(levelName) ||
+            !EntityHandler.usesLeaderAuthoritativeClientSpawns(levelName) ||
             !entity ||
             entity.isPlayer ||
-            (Number(entity.team ?? 0) !== 2 && Number(entity.team ?? 0) !== 3)
+            (Number(entity.team ?? 0) !== 2 && Number(entity.team ?? 0) !== 3) ||
+            partyId <= 0 ||
+            isClientPartyLeader(client)
         ) {
             return false;
         }
 
         const canonical =
             (levelMap && levelMap.get(Number(entity.id ?? 0))) ??
-            EntityHandler.findServerAuthoritativeSpawnMatch(levelMap, entity);
+            EntityHandler.findLeaderAuthoritativeClientSpawnMatch(levelMap, entity);
 
         EntityHandler.sendDestroyEntity(client, Number(entity.id ?? 0));
         if (canonical) {
@@ -1225,11 +1230,11 @@ export class EntityHandler {
             }
         }
 
-        if (EntityHandler.suppressDuplicateSharedClientSpawn(client, levelName, levelMap, props)) {
+        if (EntityHandler.suppressFollowerLeaderAuthoritativeDungeonSpawn(client, levelName, levelMap, props)) {
             return;
         }
 
-        if (EntityHandler.suppressServerAuthoritativeDungeonSpawn(client, levelName, levelMap, props)) {
+        if (EntityHandler.suppressDuplicateSharedClientSpawn(client, levelName, levelMap, props)) {
             return;
         }
 

@@ -1,5 +1,8 @@
 import { GlobalState } from './GlobalState';
 import { LevelConfig } from './LevelConfig';
+import { getClientLevelScope } from './LevelScope';
+import { getPartyLeaderCharacterKeyForClient } from './PartySync';
+import { normalizeCharacterKey } from './SocialState';
 
 const SHARED_DUNGEON_PROGRESS_LEVELS = new Set<string>([
     'GoblinRiverDungeon',
@@ -65,6 +68,32 @@ export function resolveSharedDungeonProgressAuthorityToken(levelScope: string | 
     const scopeKey = String(levelScope ?? '').trim();
     if (!scopeKey) {
         return 0;
+    }
+
+    let scopedPartyLeaderKey = '';
+    for (const session of GlobalState.sessionsByToken.values()) {
+        if (!session?.playerSpawned || getClientLevelScope(session) !== scopeKey) {
+            continue;
+        }
+
+        const leaderKey = getPartyLeaderCharacterKeyForClient(session);
+        if (leaderKey) {
+            scopedPartyLeaderKey = leaderKey;
+            break;
+        }
+    }
+
+    if (scopedPartyLeaderKey) {
+        for (const session of GlobalState.sessionsByToken.values()) {
+            if (
+                session?.playerSpawned &&
+                session.token > 0 &&
+                getClientLevelScope(session) === scopeKey &&
+                normalizeCharacterKey(session.character?.name) === scopedPartyLeaderKey
+            ) {
+                return session.token;
+            }
+        }
     }
 
     const levelMap = GlobalState.levelEntities.get(scopeKey);

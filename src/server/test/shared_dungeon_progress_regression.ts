@@ -94,6 +94,20 @@ function parseQuestProgress(payload: Buffer): number {
     return br.readMethod4();
 }
 
+function setPartyLeader(leader: FakeClient, ...members: FakeClient[]): void {
+    const partyId = 77;
+    const names = [leader, ...members].map((client) => client.character.name);
+    GlobalState.partyGroups.set(partyId, {
+        id: partyId,
+        leader: leader.character.name,
+        members: names,
+        locked: false
+    });
+    for (const client of [leader, ...members]) {
+        GlobalState.partyByMember.set(client.character.name.toLowerCase(), partyId);
+    }
+}
+
 async function testGoblinRiverQuestProgressStaysIncompleteBeforeHostilesExist(): Promise<void> {
     const solo = createClient(800, 'Solo');
 
@@ -123,6 +137,7 @@ async function testGoblinRiverQuestProgressFollowsHostileOwnerAuthority(): Promi
 
     GlobalState.sessionsByToken.set(authority.token, authority as never);
     GlobalState.sessionsByToken.set(joiner.token, joiner as never);
+    setPartyLeader(authority, joiner);
     GlobalState.levelEntities.set('GoblinRiverDungeon#goblin-shared', new Map<number, any>([
         [
             5001,
@@ -132,7 +147,9 @@ async function testGoblinRiverQuestProgressFollowsHostileOwnerAuthority(): Promi
                 isPlayer: false,
                 team: 2,
                 entState: 0,
-                clientSpawned: false,
+                clientSpawned: true,
+                ownerToken: authority.token,
+                ownerPartyId: 77,
                 roomId: 1
             }
         ]
@@ -140,13 +157,18 @@ async function testGoblinRiverQuestProgressFollowsHostileOwnerAuthority(): Promi
 
     await LevelHandler.handleQuestProgressUpdate(joiner as never, createQuestProgressPacket(100));
 
-    assert.equal(joiner.character.questTrackerState, 100, 'shared server hostile dungeons should accept progress from any viewer');
-    assert.equal(authority.character.questTrackerState, 100, 'the canonical progress should broadcast to every party member');
+    assert.equal(joiner.character.questTrackerState, 0, 'non-leader joiner progress should be ignored until the leader updates');
+    assert.equal(authority.character.questTrackerState, 0, 'leader progress should stay unchanged after the joiner reports false completion');
     assert.deepEqual(
         joiner.sentPackets.filter((packet) => packet.id === 0xB7).map((packet) => parseQuestProgress(packet.payload)),
-        [100],
-        'joiner should receive the canonical shared progress update'
+        [0],
+        'joiner should be corrected back to the shared leader-authoritative progress'
     );
+
+    await LevelHandler.handleQuestProgressUpdate(authority as never, createQuestProgressPacket(42));
+
+    assert.equal(authority.character.questTrackerState, 42);
+    assert.equal(joiner.character.questTrackerState, 42);
 }
 
 async function testGoblinRiverLevelCompleteWaitsForSharedProgressCompletion(): Promise<void> {
@@ -155,6 +177,7 @@ async function testGoblinRiverLevelCompleteWaitsForSharedProgressCompletion(): P
 
     GlobalState.sessionsByToken.set(authority.token, authority as never);
     GlobalState.sessionsByToken.set(joiner.token, joiner as never);
+    setPartyLeader(authority, joiner);
     GlobalState.levelEntities.set('GoblinRiverDungeon#goblin-shared', new Map<number, any>([
         [
             5101,
@@ -164,7 +187,9 @@ async function testGoblinRiverLevelCompleteWaitsForSharedProgressCompletion(): P
                 isPlayer: false,
                 team: 2,
                 entState: 0,
-                clientSpawned: false,
+                clientSpawned: true,
+                ownerToken: authority.token,
+                ownerPartyId: 77,
                 roomId: 1
             }
         ]
@@ -175,16 +200,19 @@ async function testGoblinRiverLevelCompleteWaitsForSharedProgressCompletion(): P
     assert.equal(
         joiner.sentPackets.some((packet) => packet.id === 0x87),
         false,
-        'the dungeon should not complete before shared progress reaches 100%'
+        'non-leader joiner should not complete the dungeon while leader-owned progress is incomplete'
     );
 
     await LevelHandler.handleQuestProgressUpdate(joiner as never, createQuestProgressPacket(100));
+    assert.equal(joiner.character.questTrackerState, 0, 'joiner false completion should still be ignored before the leader updates');
+
+    await LevelHandler.handleQuestProgressUpdate(authority as never, createQuestProgressPacket(100));
     await MissionHandler.handleSetLevelComplete(authority as never, createLevelCompletePacket());
 
     assert.equal(
         authority.sentPackets.some((packet) => packet.id === 0x87),
         true,
-        'any player should be able to complete the dungeon once shared progress reaches 100%'
+        'leader should complete the dungeon once shared progress reaches 100%'
     );
     assert.deepEqual(
         joiner.sentPackets.filter((packet) => packet.id === 0xB7).map((packet) => parseQuestProgress(packet.payload)).slice(-1),
@@ -199,9 +227,13 @@ async function main(): Promise<void> {
     const levelEntities = new Map(GlobalState.levelEntities);
     const sessionsByToken = new Map(GlobalState.sessionsByToken);
     const levelQuestProgress = new Map(GlobalState.levelQuestProgress);
+    const partyByMember = new Map(GlobalState.partyByMember);
+    const partyGroups = new Map(GlobalState.partyGroups);
     GlobalState.levelEntities.clear();
     GlobalState.sessionsByToken.clear();
     GlobalState.levelQuestProgress.clear();
+    GlobalState.partyByMember.clear();
+    GlobalState.partyGroups.clear();
 
     try {
         await testGoblinRiverQuestProgressStaysIncompleteBeforeHostilesExist();
@@ -209,16 +241,22 @@ async function main(): Promise<void> {
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         GlobalState.levelQuestProgress.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
         await testGoblinRiverQuestProgressFollowsHostileOwnerAuthority();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         GlobalState.levelQuestProgress.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
         await testGoblinRiverLevelCompleteWaitsForSharedProgressCompletion();
     } finally {
         GlobalState.levelEntities = levelEntities;
         GlobalState.sessionsByToken = sessionsByToken;
         GlobalState.levelQuestProgress = levelQuestProgress;
+        GlobalState.partyByMember = partyByMember;
+        GlobalState.partyGroups = partyGroups;
     }
 
     console.log('shared_dungeon_progress_regression: ok');
