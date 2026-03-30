@@ -7,6 +7,7 @@ import { JsonAdapter } from '../database/JsonAdapter';
 import { LevelConfig } from '../core/LevelConfig';
 import { GuildHandler } from './GuildHandler';
 import { LevelHandler } from './LevelHandler';
+import { PetHandler } from './PetHandler';
 import {
     ensureCharacterSocialState,
     FriendEntry,
@@ -1536,6 +1537,7 @@ export class SocialHandler {
         client.lastDoorId = 0;
         client.lastDoorTargetLevel = targetTeleport.targetLevel;
         client.armPendingTransferGrace();
+        PetHandler.armMountTravelProtection(client, 5000, false);
 
         const bb = new BitBuffer(false);
         bb.writeMethod4(0);
@@ -1573,6 +1575,7 @@ export class SocialHandler {
         client.lastDoorId = 999;
         client.lastDoorTargetLevel = 'CraftTown';
         client.armPendingTransferGrace();
+        PetHandler.armMountTravelProtection(client, 5000, false);
         client.sendBitBuffer(0x2e, bb);
         SocialHandler.sendChatStatus(client, `Visiting ${targetChar.name}'s house...`);
     }

@@ -6,7 +6,9 @@ import { Character } from '../database/Database';
 import { GlobalState } from '../core/GlobalState';
 import { CharacterHandler } from '../handlers/CharacterHandler';
 import { LevelHandler } from '../handlers/LevelHandler';
+import { PetHandler } from '../handlers/PetHandler';
 import { BitBuffer } from '../network/protocol/bitBuffer';
+import { BitReader } from '../network/protocol/bitReader';
 import { LevelConfig } from '../core/LevelConfig';
 
 function createCharacter(name: string): Character {
@@ -39,6 +41,7 @@ function createClient(): any {
         lastDoorId: -1,
         lastDoorTargetLevel: '',
         playerSpawned: false,
+        mountTransferGraceUntil: 0,
         startedRoomEvents: new Set<string>(),
         sentPackets,
         armPendingTransferGrace() {
@@ -57,6 +60,14 @@ function createOpenDoorPacket(doorId: number): Buffer {
     const bb = new BitBuffer();
     bb.writeMethod9(doorId);
     return bb.toBuffer();
+}
+
+function parseMountEquipPacket(payload: Buffer): { entityId: number; mountId: number } {
+    const br = new BitReader(payload);
+    return {
+        entityId: br.readMethod4(),
+        mountId: br.readMethod6(7)
+    };
 }
 
 function withMockedRandom(values: number[], fn: () => void): void {
@@ -645,6 +656,75 @@ function testTutorialDungeonTraversalTutorialStartsOnRoomFourEntry(): void {
     assert.deepEqual(client.sentPackets.map((packet: { id: number }) => packet.id), [0xA5]);
 }
 
+function testRoomChangeReassertsMountedState(): void {
+    const client = createClient();
+    client.token = 8003;
+    client.clientEntID = 412;
+    client.currentLevel = 'CraftTown';
+    client.currentRoomId = 1;
+    client.playerSpawned = true;
+    client.character = {
+        ...createCharacter('MountedHero'),
+        equippedMount: 37
+    };
+
+    const originalSessionsByToken = GlobalState.sessionsByToken;
+    const originalSetTimeout = global.setTimeout;
+    GlobalState.sessionsByToken = new Map([[client.token, client as never]]);
+    global.setTimeout = ((fn: (...args: any[]) => void) => {
+        fn();
+        return 0 as any;
+    }) as typeof setTimeout;
+
+    try {
+        (LevelHandler as any).cacheRoomId(client, 2);
+    } finally {
+        GlobalState.sessionsByToken = originalSessionsByToken;
+        global.setTimeout = originalSetTimeout;
+    }
+
+    assert.equal(client.currentRoomId, 2, 'room cache should update the active room id');
+    assert.ok(
+        Number(client.mountTransferGraceUntil) > Date.now(),
+        'room changes should arm mount travel grace for mounted players'
+    );
+
+    const mountPackets = client.sentPackets.filter((packet: { id: number; payload: Buffer }) => packet.id === 0xB2);
+    assert.ok(mountPackets.length > 0, 'room changes should reassert the equipped mount to the local client');
+
+    const parsed = parseMountEquipPacket(mountPackets[0].payload);
+    assert.equal(parsed.entityId, 412);
+    assert.equal(parsed.mountId, 37);
+}
+
+async function testDoorTransferIgnoresTransientMountClear(): Promise<void> {
+    const client = createClient();
+    client.token = 8004;
+    client.clientEntID = 412;
+    client.userId = 41;
+    client.currentLevel = 'CraftTown';
+    client.currentRoomId = 1;
+    client.playerSpawned = true;
+    client.character = {
+        ...createCharacter('MountedHero'),
+        equippedMount: 37
+    };
+    client.characters = [client.character];
+
+    const mountClear = new BitBuffer();
+    mountClear.writeMethod4(412);
+    mountClear.writeMethod6(0, 7);
+
+    LevelHandler.handleOpenDoor(client, createOpenDoorPacket(0));
+    await PetHandler.handleMountEquipPacket(client, mountClear.toBuffer());
+
+    assert.equal(client.character.equippedMount, 37, 'door transfers should ignore transient mount clear packets');
+    assert.ok(
+        Number(client.mountTransferGraceUntil) > Date.now(),
+        'door transfers should arm mount travel grace before transient mount clear packets arrive'
+    );
+}
+
 function testTutorialDungeonDropTutorialStartsRoomFiveOnTraversalInput(): void {
     const client = createClient();
     client.currentLevel = 'TutorialDungeon';
@@ -758,7 +838,7 @@ function testLevelTransferTokenSkipsTargetLevelEntityAndLivePlayerIds(): void {
     assert.equal(allocatedToken, 4098);
 }
 
-function main(): void {
+async function main(): Promise<void> {
     ensureLevelConfigLoaded();
 
     const sessionsByToken = new Map(GlobalState.sessionsByToken);
@@ -954,6 +1034,10 @@ function main(): void {
 
         testTutorialDungeonTraversalTutorialStartsOnRoomFourEntry();
 
+        testRoomChangeReassertsMountedState();
+
+        await testDoorTransferIgnoresTransientMountClear();
+
         testTutorialDungeonDropTutorialStartsRoomFiveOnTraversalInput();
     } finally {
         GlobalState.sessionsByToken = sessionsByToken;
@@ -971,10 +1055,8 @@ function main(): void {
     console.log('level_transfer_regression: ok');
 }
 
-try {
-    main();
-} catch (error) {
+void main().catch((error) => {
     console.error('level_transfer_regression: failed');
     console.error(error);
     process.exitCode = 1;
-}
+});

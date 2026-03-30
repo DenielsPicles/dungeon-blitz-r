@@ -12,6 +12,22 @@ const db = new JsonAdapter();
 export class PetHandler {
     private static readonly MOUNT_REASSERT_DELAYS_MS = [0, 300, 1200, 2500, 4000];
 
+    static armMountTravelProtection(client: Client, durationMs: number = 4000, reassert: boolean = false): void {
+        const mountId = Number(client.character?.equippedMount ?? 0);
+        if (mountId <= 0) {
+            return;
+        }
+
+        client.mountTransferGraceUntil = Math.max(
+            Number(client.mountTransferGraceUntil ?? 0),
+            Date.now() + Math.max(0, durationMs)
+        );
+
+        if (reassert) {
+            PetHandler.reassertEquippedMount(client);
+        }
+    }
+
     private static shouldIgnoreTransientTravelUnequip(client: Client, mountId: number): boolean {
         if (mountId !== 0) {
             return false;

@@ -18,6 +18,7 @@ import { MissionID } from '../data/runtime';
 import { Entity, EntityTeam } from '../core/Entity';
 import { EntityHandler } from './EntityHandler';
 import { MissionHandler } from './MissionHandler';
+import { PetHandler } from './PetHandler';
 import { JsonAdapter } from '../database/JsonAdapter';
 import { normalizeCharacterKey, PendingTeleport } from '../core/SocialState';
 import { TransferTokenAllocator } from '../core/TransferTokenAllocator';
@@ -1934,7 +1935,13 @@ export class LevelHandler {
 
     private static cacheRoomId(client: Client, roomId: number): void {
         if (Number.isFinite(roomId) && roomId >= 0) {
+            const previousRoomId = Number.isFinite(Number(client.currentRoomId))
+                ? Math.round(Number(client.currentRoomId))
+                : -1;
             client.currentRoomId = roomId;
+            if (previousRoomId >= 0 && previousRoomId !== roomId) {
+                PetHandler.armMountTravelProtection(client, 4000, true);
+            }
             LevelHandler.maybeStartTutorialDungeonTraversalTutorial(client, roomId);
         }
     }
@@ -2504,6 +2511,7 @@ export class LevelHandler {
             client.lastDoorId = doorId;
             client.lastDoorTargetLevel = targetLevel;
             client.armPendingTransferGrace();
+            PetHandler.armMountTravelProtection(client, 5000, false);
             const bb = new BitBuffer();
             bb.writeMethod4(doorId);
             bb.writeMethod13(targetLevel);

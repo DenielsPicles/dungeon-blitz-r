@@ -262,6 +262,20 @@ export class CharacterHandler {
         return bb;
     }
 
+    private static buildLevelGearsPacket(character: Character): BitBuffer {
+        const bb = new BitBuffer(false);
+        const inventoryGears = Array.isArray(character.inventoryGears) ? character.inventoryGears : [];
+
+        bb.writeMethod4(inventoryGears.length);
+        for (const rawGear of inventoryGears) {
+            const gear = (rawGear && typeof rawGear === 'object') ? rawGear as Record<string, unknown> : {};
+            bb.writeMethod6(Number(gear.gearID ?? 0), 11);
+            bb.writeMethod6(Number(gear.tier ?? 0), 2);
+        }
+
+        return bb;
+    }
+
     private static syncCurrentPlayerLookEntity(client: Client): void {
         const entityId = Number(client.clientEntID || 0);
         if (!client.character || entityId <= 0) {
@@ -339,6 +353,16 @@ export class CharacterHandler {
         }
 
         client.sendBitBuffer(0x1A, CharacterHandler.buildPaperDollPacket(character));
+    }
+
+    static handleRequestArmoryGears(client: Client, data: Buffer): void {
+        if (!client.character) {
+            return;
+        }
+
+        const br = new BitReader(data);
+        br.readMethod9();
+        client.sendBitBuffer(0xF5, CharacterHandler.buildLevelGearsPacket(client.character));
     }
 
     static async handleHomeLookChange(client: Client, data: Buffer): Promise<void> {
