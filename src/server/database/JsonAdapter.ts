@@ -116,6 +116,15 @@ export class JsonAdapter implements IDatabase {
         }
     }
 
+    private static async waitForQueuedSave(savePath: string): Promise<void> {
+        const pendingSave = JsonAdapter.saveQueues.get(savePath);
+        if (!pendingSave) {
+            return;
+        }
+
+        await pendingSave.catch(() => undefined);
+    }
+
     private async readAccounts(): Promise<Array<{ email: string, user_id: number }>> {
         for (const accountsPath of [this.accountsPath, this.legacyAccountsPath]) {
             try {
@@ -166,6 +175,7 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async loadCharacters(userId: number): Promise<Character[]> {
+        await JsonAdapter.waitForQueuedSave(path.join(this.savesDir, `${userId}.json`));
         const save = await this.readSaveFile(userId);
         if (!save || !Array.isArray(save.characters)) {
             return [];

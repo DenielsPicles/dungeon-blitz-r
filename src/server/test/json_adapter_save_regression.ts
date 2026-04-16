@@ -110,9 +110,53 @@ async function testSaveCharactersSerializesConcurrentWrites(): Promise<void> {
     });
 }
 
+async function testLoadCharactersWaitsForQueuedSave(): Promise<void> {
+    await withTempDataDir('load_waits_for_queue', async (adapter) => {
+        const adapterClass = JsonAdapter as unknown as {
+            renameFile: (fromPath: string, toPath: string) => Promise<void>;
+        };
+        const originalRenameFile = adapterClass.renameFile;
+        let releaseRename: () => void = () => undefined;
+
+        const renameStarted = new Promise<void>((resolve) => {
+            adapterClass.renameFile = async (oldPath: string, newPath: string) => {
+                resolve();
+                await new Promise<void>((renameResolve) => {
+                    releaseRename = renameResolve;
+                });
+                return originalRenameFile(oldPath, newPath);
+            };
+        });
+
+        try {
+            await adapter.saveCharacters(11, [createCharacter('BeforeTransfer')]);
+
+            const pendingSave = adapter.saveCharacters(11, [createCharacter('AfterTransfer')]);
+            await renameStarted;
+
+            const loadPromise = adapter.loadCharacters(11);
+            await delay(20);
+            releaseRename();
+
+            const loadedCharacters = await loadPromise;
+            await pendingSave;
+
+            assert.equal(
+                loadedCharacters[0]?.name,
+                'AfterTransfer',
+                'loads should wait for queued writes so transfers do not rehydrate stale character state'
+            );
+        } finally {
+            releaseRename();
+            adapterClass.renameFile = originalRenameFile;
+        }
+    });
+}
+
 async function main(): Promise<void> {
     await testSaveCharactersRetriesTransientRenameLock();
     await testSaveCharactersSerializesConcurrentWrites();
+    await testLoadCharactersWaitsForQueuedSave();
     console.log('json_adapter_save_regression: ok');
 }
 
