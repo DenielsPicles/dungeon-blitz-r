@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { MageGear, PaladinGear, RogueGear } from '../data/runtime';
+import { readJsonFile } from '../utils/JsonFile';
 
 export class GameData {
     static readonly MONSTER_GOLD_TABLE: number[] = [0, 43, 46, 49, 53, 57, 61, 65, 70, 75, 80, 86, 92, 98, 106, 113, 121, 130, 139, 149, 160, 171, 184, 197, 211, 226, 243, 260, 279, 299, 320, 343, 368, 394, 422, 453, 485, 520, 557, 597, 640, 686, 735, 788, 844, 905, 970, 1040, 1114, 1194, 1280];
@@ -37,7 +38,7 @@ export class GameData {
         try {
             const entPath = path.join(dataDir, 'EntTypes.json');
             if (fs.existsSync(entPath)) {
-                const data = JSON.parse(fs.readFileSync(entPath, 'utf-8'));
+                const data = readJsonFile<any>(entPath);
                 const rawList = data.EntTypes?.EntType || [];
                 const rawDict: { [key: string]: any } = {};
                 for (const item of rawList) {
@@ -58,7 +59,7 @@ export class GameData {
         try {
             const mountPath = path.join(dataDir, 'mount_ids.json');
             if (fs.existsSync(mountPath)) {
-                GameData.MOUNT_IDS = JSON.parse(fs.readFileSync(mountPath, 'utf-8'));
+                GameData.MOUNT_IDS = readJsonFile<{ [key: string]: number }>(mountPath);
                 console.log(`[GameData] Loaded ${Object.keys(GameData.MOUNT_IDS).length} mounts.`);
             }
         } catch (err) {
@@ -68,7 +69,7 @@ export class GameData {
         try {
             const consumPath = path.join(dataDir, 'ConsumableTypes.json');
             if (fs.existsSync(consumPath)) {
-                GameData.CONSUMABLES = JSON.parse(fs.readFileSync(consumPath, 'utf-8'));
+                GameData.CONSUMABLES = readJsonFile<any[]>(consumPath);
                 console.log(`[GameData] Loaded ${GameData.CONSUMABLES.length} consumables.`);
             }
         } catch (err) {
@@ -78,7 +79,7 @@ export class GameData {
         try {
             const charmPath = path.join(dataDir, 'Charms.json');
             if (fs.existsSync(charmPath)) {
-                GameData.CHARMS = JSON.parse(fs.readFileSync(charmPath, 'utf-8'));
+                GameData.CHARMS = readJsonFile<any[]>(charmPath);
                 console.log(`[GameData] Loaded ${GameData.CHARMS.length} charms.`);
             }
         } catch (err) {
@@ -88,7 +89,7 @@ export class GameData {
         try {
             const dyesPath = path.join(dataDir, 'DyeTypes.json');
             if (fs.existsSync(dyesPath)) {
-                const rawDyes = JSON.parse(fs.readFileSync(dyesPath, 'utf-8'));
+                const rawDyes = readJsonFile<Record<string, { name?: string; rarity?: string; color?: number | string }>>(dyesPath);
                 GameData.DYES = Object.entries(rawDyes).map(([id, value]) => ({
                     id: Number(id),
                     name: String((value as { name?: string }).name ?? ''),
@@ -106,7 +107,7 @@ export class GameData {
         try {
             const materialsPath = path.join(dataDir, 'Materials.json');
             if (fs.existsSync(materialsPath)) {
-                GameData.MATERIALS = JSON.parse(fs.readFileSync(materialsPath, 'utf-8'));
+                GameData.MATERIALS = readJsonFile<any[]>(materialsPath);
                 GameData.MATERIALS_BY_REALM = {};
                 for (const material of GameData.MATERIALS) {
                     const realm = String(material.DropRealm || '').trim();
@@ -133,7 +134,7 @@ export class GameData {
         try {
             const gearPath = path.join(dataDir, 'gear_data.json');
             if (fs.existsSync(gearPath)) {
-                GameData.GEAR_DATA = JSON.parse(fs.readFileSync(gearPath, 'utf-8'));
+                GameData.GEAR_DATA = readJsonFile<{ realm_drops: Record<string, number[]>; boss_drops: Record<string, number[]>; global_drops: number[] }>(gearPath);
                 console.log(`[GameData] Loaded gear drop data.`);
             }
         } catch (err) {

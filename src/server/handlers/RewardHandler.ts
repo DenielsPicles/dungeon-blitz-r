@@ -379,13 +379,16 @@ export class RewardHandler {
         const ownedGearIds = RewardHandler.collectOwnedGearIds(client);
         const realm = String(entType?.Realm ?? RewardHandler.DUNGEON_REALM_MAP[client.currentLevel] ?? '');
         const itemLootAllowedByClass = RewardHandler.rewardClassAllowsItemLoot(entType);
+        const isDungeonEnemyReward = Boolean(entName) && Boolean(entType) && sourceEntity && !sourceEntity.isPlayer;
         const materialFindRate = petBonuses.craftFind + charmBonuses.craftFind + potionBonuses.craftFind;
         const itemFindRate = petBonuses.itemFind + charmBonuses.itemFind + potionBonuses.itemFind;
         const goldFindRate = petBonuses.goldFind + charmBonuses.goldFind + potionBonuses.goldFind;
-        const materialChance = realm && reward.dropMaterial && itemLootAllowedByClass
+        const shouldRollMaterial = Boolean(realm) && itemLootAllowedByClass && (reward.dropMaterial || isDungeonEnemyReward);
+        const shouldRollGear = itemLootAllowedByClass && (reward.dropGear || isDungeonEnemyReward);
+        const materialChance = shouldRollMaterial
             ? Math.max(0, Math.min(1, RewardHandler.resolveMaterialDropChance(entType, reward) * (1 + materialFindRate)))
             : 0;
-        const gearChance = reward.dropGear && itemLootAllowedByClass
+        const gearChance = shouldRollGear
             ? Math.max(0, Math.min(1, RewardHandler.resolveGearDropChance(entType, reward) * (1 + itemFindRate)))
             : 0;
         const dyeRarity = RewardHandler.resolveDyeDropRarity(client, entType);
@@ -412,7 +415,7 @@ export class RewardHandler {
             gold = Math.max(0, Math.round(gold * (1 + goldFindRate)));
         }
 
-        const needsFallback = gold <= 0 && !reward.dropGear && !reward.dropMaterial;
+        const needsFallback = gold <= 0 && !shouldRollGear && !shouldRollMaterial;
         if (!needsFallback) {
             return { exp, gold, hpGain, materialId, gearId, gearTier, dyeId };
         }

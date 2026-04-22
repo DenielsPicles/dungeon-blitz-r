@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { readJsonFile } from '../utils/JsonFile';
 
 export interface LevelSpec {
     swf: string;
@@ -102,7 +103,7 @@ export class LevelConfig {
         // Load Level Config
         try {
             const levelConfigPath = path.join(dataDir, 'level_config.json');
-            const levelData = JSON.parse(fs.readFileSync(levelConfigPath, 'utf-8'));
+            const levelData = readJsonFile<Record<string, string>>(levelConfigPath);
 
             for (const [name, spec] of Object.entries(levelData)) {
                 if (typeof spec !== 'string') continue;
@@ -128,7 +129,7 @@ export class LevelConfig {
         // Load Door Map
         try {
             const doorMapPath = path.join(dataDir, 'door_map.json');
-            const doorData = JSON.parse(fs.readFileSync(doorMapPath, 'utf-8'));
+            const doorData = readJsonFile<any[]>(doorMapPath);
             
             // Format: [[["CurrentLevel", DoorID], "TargetLevel"], ...]
             if (Array.isArray(doorData)) {

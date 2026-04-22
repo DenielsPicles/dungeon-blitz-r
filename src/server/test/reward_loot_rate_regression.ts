@@ -174,29 +174,29 @@ async function testRandomItemLieutenantUsesItemDropChanceForGear(): Promise<void
     });
     setContributors(getClientLevelScope(alpha as never), sourceId, ['beta']);
 
-    await withMockedRandom([0.5, 0.2, 0.0, 0.99], async () => {
+    await withMockedRandom([0.5, 0.99, 0.05, 0.99], async () => {
         await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
-            dropGear: true,
+            dropGear: false,
             dropItem: false
         }));
     });
 
-    assert.equal(findLoot(alpha, 'gear'), null, 'Lieutenant gear should not drop when the 10% roll fails');
+    assert.equal(findLoot(alpha, 'gear'), null, 'Lieutenant gear should not drop when the 3% roll fails, even if the packet omitted the gear flag');
 
     alpha.pendingLoot.clear();
     alpha.processedRewardSources.clear();
 
-    await withMockedRandom([0.5, 0.05, 0.0, 0.99], async () => {
+    await withMockedRandom([0.5, 0.99, 0.02, 0.0, 0.99], async () => {
         await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
-            dropGear: true,
+            dropGear: false,
             dropItem: false
         }));
     });
 
-    assert.ok(findLoot(alpha, 'gear'), 'Lieutenant gear should drop when the 10% roll succeeds');
+    assert.ok(findLoot(alpha, 'gear'), 'Lieutenant gear should still drop when the 3% roll succeeds and the packet omitted the gear flag');
 }
 
-async function testMaterialRequiresExplicitDropFlag(): Promise<void> {
+async function testEnemyMaterialDropsWithoutExplicitDropFlag(): Promise<void> {
     const alpha = createFakeClient(3, 'Gamma');
     GlobalState.sessionsByToken.set(alpha.token, alpha as never);
 
@@ -214,23 +214,11 @@ async function testMaterialRequiresExplicitDropFlag(): Promise<void> {
     await withMockedRandom([0.0, 0.99, 0.0, 0.99], async () => {
         await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
             dropMaterial: false,
-            gearMultiplier: 10
-        }));
-    });
-
-    assert.equal(findLoot(alpha, 'material'), null, 'material should not drop when dropMaterial is false');
-
-    alpha.pendingLoot.clear();
-    alpha.processedRewardSources.clear();
-
-    await withMockedRandom([0.0, 0.99, 0.0, 0.99], async () => {
-        await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
-            dropMaterial: true,
             gearMultiplier: 1
         }));
     });
 
-    assert.ok(findLoot(alpha, 'material'), 'material should drop when dropMaterial is true and the boss roll succeeds');
+    assert.ok(findLoot(alpha, 'material'), 'enemy material should still drop when the boss roll succeeds and the packet omitted the material flag');
 }
 
 async function testGearRarityTracksValueTier(): Promise<void> {
@@ -248,7 +236,7 @@ async function testGearRarityTracksValueTier(): Promise<void> {
     });
     setContributors(getClientLevelScope(alpha as never), sourceId, ['delta']);
 
-    await withMockedRandom([0.5, 0.05, 0.0, 0.10], async () => {
+    await withMockedRandom([0.5, 0.99, 0.02, 0.0, 0.10], async () => {
         await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
             dropGear: true
         }));
@@ -258,12 +246,12 @@ async function testGearRarityTracksValueTier(): Promise<void> {
     alpha.pendingLoot.clear();
     alpha.processedRewardSources.clear();
 
-    await withMockedRandom([0.5, 0.05, 0.0, 0.92], async () => {
+    await withMockedRandom([0.5, 0.99, 0.02, 0.0, 0.92], async () => {
         await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
             dropGear: true
         }));
     });
-    assert.equal(findLoot(alpha, 'gear')?.tier, 1, 'random-item rare gear should map to tier 1');
+    assert.equal(findLoot(alpha, 'gear')?.tier, 0, 'normal random-item gear should still map to tier 0');
 
     alpha.pendingLoot.clear();
     alpha.processedRewardSources.clear();
@@ -279,7 +267,17 @@ async function testGearRarityTracksValueTier(): Promise<void> {
     });
     setContributors(getClientLevelScope(alpha as never), sourceId, ['delta']);
 
-    await withMockedRandom([0.0, 0.99, 0.0, 0.95], async () => {
+    await withMockedRandom([0.0, 0.99, 0.0, 0.0, 0.75], async () => {
+        await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
+            dropGear: true
+        }));
+    });
+    assert.equal(findLoot(alpha, 'gear')?.tier, 1, 'hard fixed-item bosses should be able to produce rare gear');
+
+    alpha.pendingLoot.clear();
+    alpha.processedRewardSources.clear();
+
+    await withMockedRandom([0.0, 0.99, 0.0, 0.0, 0.95], async () => {
         await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
             dropGear: true
         }));
@@ -303,7 +301,7 @@ async function testOwnedGearDoesNotDropAgain(): Promise<void> {
     });
     setContributors(getClientLevelScope(alpha as never), sourceId, ['zeta']);
 
-    await withMockedRandom([0.5, 0.05, 0.0, 0.1], async () => {
+    await withMockedRandom([0.5, 0.99, 0.02, 0.0, 0.1], async () => {
         await RewardHandler.handleGrantReward(alpha as never, buildGrantRewardPayload(sourceId, {
             dropGear: true
         }));
@@ -391,7 +389,7 @@ async function main(): Promise<void> {
         GlobalState.sessionsByToken.clear();
         GlobalState.levelEntities.clear();
         GlobalState.combatContributions.clear();
-        await testMaterialRequiresExplicitDropFlag();
+        await testEnemyMaterialDropsWithoutExplicitDropFlag();
 
         GlobalState.sessionsByToken.clear();
         GlobalState.levelEntities.clear();

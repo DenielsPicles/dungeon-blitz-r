@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { readJsonFile } from '../utils/JsonFile';
 
 export class PetConfig {
     static PET_TYPES: any[] = [];
@@ -38,7 +39,7 @@ export class PetConfig {
     static load(dataDir: string) {
         try {
             const petsPath = path.join(dataDir, 'pet_types.json');
-            PetConfig.PET_TYPES = JSON.parse(fs.readFileSync(petsPath, 'utf-8'));
+            PetConfig.PET_TYPES = readJsonFile<any[]>(petsPath);
             console.log(`[PetConfig] Loaded ${PetConfig.PET_TYPES.length} pets.`);
         } catch (err) {
             console.error(`[PetConfig] Failed to load pet_types.json:`, err);
@@ -46,7 +47,7 @@ export class PetConfig {
 
         try {
             const eggsPath = path.join(dataDir, 'egg_types.json');
-            PetConfig.EGG_TYPES = JSON.parse(fs.readFileSync(eggsPath, 'utf-8'));
+            PetConfig.EGG_TYPES = readJsonFile<any[]>(eggsPath);
             console.log(`[PetConfig] Loaded ${PetConfig.EGG_TYPES.length} eggs.`);
         } catch (err) {
             console.error(`[PetConfig] Failed to load egg_types.json:`, err);
