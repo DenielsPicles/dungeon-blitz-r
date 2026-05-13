@@ -18,6 +18,7 @@ import { SocialHandler } from './SocialHandler';
 import { GuildHandler } from './GuildHandler';
 import { EntityHandler } from './EntityHandler';
 import { PetHandler } from './PetHandler';
+import { BuildingHandler } from './BuildingHandler';
 import { ForgeHandler } from './ForgeHandler';
 import { TalentHandler } from './TalentHandler';
 import { DebugLogger } from '../core/Debug';
@@ -822,6 +823,7 @@ export class CharacterHandler {
         }
 
         client.character = char;
+        await BuildingHandler.syncCompletionState(client);
         await ForgeHandler.syncCompletionState(client);
         console.log(`[CharacterSelect] Selected ${char.name}`);
         
@@ -1030,6 +1032,7 @@ export class CharacterHandler {
         }
 
         await CharacterHandler.reloadCurrentCharacterFromSave(client);
+        await BuildingHandler.syncCompletionState(client);
         await ForgeHandler.syncCompletionState(client);
         TalentHandler.syncResearchTimer(client);
 
@@ -1108,6 +1111,7 @@ export class CharacterHandler {
             hasCoord: entry.newHasCoord ?? false
         };
         LevelHandler.prepareGoblinRiverDungeonEntryState(client);
+        await MissionHandler.prepareFullClearDungeonEntry(client);
 
         // Send Player Data (0x10)
         const pdPkt = WorldEnter.buildPlayerDataPacket(
@@ -1133,6 +1137,7 @@ export class CharacterHandler {
             payloadPreview: DebugLogger.previewBuffer(pdBuffer)
         });
 
+        MissionHandler.syncFullClearDungeonEntryMissionToClient(client);
         MissionHandler.syncMissionStateToClient(client);
         CharacterHandler.sendBootstrappedStoryMission(client, storyRepair.addedMissionId);
 
