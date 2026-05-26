@@ -2,13 +2,32 @@ import express, { type Response } from 'express';
 import * as fs from 'fs';
 import type { Server as HttpServer } from 'http';
 import * as path from 'path';
+import * as zlib from 'zlib';
 import type { Request } from 'express';
 import { Config } from './config';
-import { buildDungeonBlitzSwfVariantBuffer, type DungeonBlitzSwfLocale } from './DungeonBlitzSwf';
+import {
+    BRAZILIAN_PORTUGUESE_ASSET_REPLACEMENTS,
+    BRAZILIAN_PORTUGUESE_LEVELS_BT_REPLACEMENTS,
+    BRAZILIAN_PORTUGUESE_LEVELS_CH_REPLACEMENTS,
+    BRAZILIAN_PORTUGUESE_LEVELS_HOME_TEXT_REPLACEMENTS,
+    BRAZILIAN_PORTUGUESE_LEVELS_SRN_REPLACEMENTS,
+    BRAZILIAN_PORTUGUESE_UI1_REPLACEMENTS,
+    BRAZILIAN_PORTUGUESE_UI4_REPLACEMENTS,
+    SWF_RUNTIME_VERSION,
+    buildDungeonBlitzSwfVariantBuffer,
+    buildPortugueseAssetSwfBuffer,
+    buildPortugueseExactAssetSwfBuffer,
+    buildPortugueseLevelsNrSwfBuffer,
+    buildPortugueseUi1SwfBuffer,
+    buildPortugueseUi4SwfBuffer,
+    buildSwfTagStringReplacementBuffer,
+    type DungeonBlitzSwfLocale
+} from './DungeonBlitzSwf';
 import { PresenceService } from './PresenceService';
 import { SocialHandler } from '../handlers/SocialHandler';
 import { GlobalState } from './GlobalState';
 import { DiscordAccountLinkService } from '../integrations/DiscordAccountLinkService';
+import { DialogueTranslationLoader } from '../data/DialogueTranslationLoader';
 
 function resolveContentDir(relativeContentPath: string): string {
     const candidates = [
@@ -37,6 +56,31 @@ function escapeHtml(value: string | null | undefined): string {
         .replace(/'/g, '&#39;');
 }
 
+const BRAZILIAN_PORTUGUESE_XML_REPLACEMENTS = new Map<string, string>([
+    ['Invite a player to be your friend.', 'Convide um jogador para ser seu amigo.'],
+    ['Accept no more messages from a player.', 'Não aceite mais mensagens de um jogador.'],
+    ['Chat    shortcut:    Hit [Enter] to begin              Hit [Enter] to send', 'Atalho do chat:    Pressione [Enter] para começar              Pressione [Enter] para enviar']
+]);
+
+const BRAZILIAN_PORTUGUESE_ENT_TYPES_XML_REPLACEMENTS = new Map<string, string>([
+    ['<EntType EntName="CaptainGar" parent="Base">\r\n\t\t<DisplayName>kaptan Gar</DisplayName>', '<EntType EntName="CaptainGar" parent="Base">\r\n\t\t<DisplayName>Capitão Gar</DisplayName>'],
+    ['<EntType EntName="CaptainGar" parent="Base">\n\t\t<DisplayName>kaptan Gar</DisplayName>', '<EntType EntName="CaptainGar" parent="Base">\n\t\t<DisplayName>Capitão Gar</DisplayName>'],
+    ['<EntType EntName="CaptainGar" parent="Base">\r\n\t\t<DisplayName>Captain Gar</DisplayName>', '<EntType EntName="CaptainGar" parent="Base">\r\n\t\t<DisplayName>Capitão Gar</DisplayName>'],
+    ['<EntType EntName="CaptainGar" parent="Base">\n\t\t<DisplayName>Captain Gar</DisplayName>', '<EntType EntName="CaptainGar" parent="Base">\n\t\t<DisplayName>Capitão Gar</DisplayName>']
+]);
+
+const BRAZILIAN_PORTUGUESE_LEVEL_TYPES_XML_REPLACEMENTS = new Map<string, string>([
+    ['<DisplayName>dehset Rising Damned</DisplayName>', '<DisplayName>Condenados se Erguem</DisplayName>'],
+    ['<DisplayName>Rising Damned</DisplayName>', '<DisplayName>Condenados se Erguem</DisplayName>'],
+    ['<DisplayName>Os Condenados se Erguem</DisplayName>', '<DisplayName>Condenados se Erguem</DisplayName>'],
+    ['<DisplayName>Os Condenados se Erguer</DisplayName>', '<DisplayName>Condenados se Erguem</DisplayName>']
+]);
+
+type SwzEntry = {
+    rootName: string;
+    xml: string;
+};
+
 export class StaticServer {
     private app: express.Application;
     private server: HttpServer | null;
@@ -44,6 +88,7 @@ export class StaticServer {
     private contentDir: string;
     private host: string;
     private selectedSwfCache: { key: string; buffer: Buffer } | null;
+    private localizedAssetSwfCache: { key: string; buffer: Buffer } | null;
     private readonly discordAccountLinks: DiscordAccountLinkService;
     private readonly flashVersion = 'cdb';
     private readonly gameVersion = 'cdb';
@@ -58,6 +103,7 @@ export class StaticServer {
         this.app = express();
         this.server = null;
         this.selectedSwfCache = null;
+        this.localizedAssetSwfCache = null;
         this.discordAccountLinks = new DiscordAccountLinkService();
         
         // Resolve against the server root so dist and ts-node use the same content directory.
@@ -74,14 +120,79 @@ export class StaticServer {
         const mode = Config.MULTIPLAYER_MODE ? 'multiplayer' : 'local';
         const swfPath = this.getSelectedSwfPath();
         const stats = fs.statSync(swfPath);
-        const cacheKey = `${mode}:${locale}:${swfPath}:${stats.mtimeMs}:${stats.size}`;
+        const ptbrMainText = process.env.DB_PTBR_MAIN_SWF_TEXT === '1' ? 'on' : 'off';
+        const ptbrEmotePatches = process.env.DB_PTBR_EMOTE_PATCHES === '0' ? 'off' : 'on';
+        const cacheKey = `${mode}:${locale}:${ptbrMainText}:${ptbrEmotePatches}:${SWF_RUNTIME_VERSION}:${swfPath}:${stats.mtimeMs}:${stats.size}`;
         if (this.selectedSwfCache?.key === cacheKey) {
             return this.selectedSwfCache.buffer;
         }
 
         const buffer = buildDungeonBlitzSwfVariantBuffer(swfPath, mode, locale);
         this.selectedSwfCache = { key: cacheKey, buffer };
-        console.log(`[StaticServer] Prepared DungeonBlitz.swf variant for ${mode} mode (${locale}).`);
+        const ptbrFlags = locale === 'pt-br'
+            ? ` ptbrMainText=${ptbrMainText} ptbrEmotePatches=${ptbrEmotePatches}`
+            : '';
+        console.log(`[StaticServer] Prepared DungeonBlitz.swf variant for ${mode} mode (${locale}).${ptbrFlags}`);
+        return buffer;
+    }
+
+    private getLocalizedAssetSwfBuffer(assetRelativePath: string, locale: DungeonBlitzSwfLocale): Buffer {
+        const swfPath = path.join(this.contentDir, assetRelativePath);
+        const stats = fs.statSync(swfPath);
+        const shouldLocalizeAssets = process.env.DB_PTBR_LOCALIZED_ASSETS !== '0';
+        const cacheKey = `${locale}:${shouldLocalizeAssets ? 'assets-on' : 'assets-off'}:${SWF_RUNTIME_VERSION}:${swfPath}:${stats.mtimeMs}:${stats.size}`;
+        if (this.localizedAssetSwfCache?.key === cacheKey) {
+            return this.localizedAssetSwfCache.buffer;
+        }
+
+        const assetName = path.basename(assetRelativePath).toLowerCase();
+        const isTutorialLevelsAsset = assetName === 'levelsnr.swf' || assetName === 'levelstut.swf';
+        let buffer: Buffer;
+        if (locale === 'pt-br' && shouldLocalizeAssets) {
+            if (assetName === 'ui_1.swf') {
+                buffer = buildPortugueseUi1SwfBuffer(swfPath, BRAZILIAN_PORTUGUESE_UI1_REPLACEMENTS);
+                console.log(`[StaticServer] Served ${assetRelativePath} for pt-br with localizedAssets=on (ui patch applied).`);
+            } else if (assetName === 'ui_4.swf') {
+                buffer = buildPortugueseUi4SwfBuffer(swfPath, BRAZILIAN_PORTUGUESE_UI4_REPLACEMENTS);
+                console.log(`[StaticServer] Served ${assetRelativePath} for pt-br with localizedAssets=on (ui_4 exact UI strings patched).`);
+            } else if (assetName === 'levelsnr.swf') {
+                const result = buildPortugueseLevelsNrSwfBuffer(swfPath);
+                buffer = result.buffer;
+                if (result.changed) {
+                    console.log(`[StaticServer] Served ${assetRelativePath} for pt-br — text/script tags PATCHED. Matched strings (${result.matchedStrings.length}): ${result.matchedStrings.map((s) => JSON.stringify(s)).join(', ')}`);
+                } else {
+                    console.log(`[StaticServer] Served ${assetRelativePath} for pt-br — NO text/script tag matches found, serving raw file unchanged.`);
+                }
+            } else if (isTutorialLevelsAsset) {
+                const result = buildSwfTagStringReplacementBuffer(swfPath, BRAZILIAN_PORTUGUESE_ASSET_REPLACEMENTS);
+                buffer = result.buffer;
+                if (result.changed) {
+                    console.log(`[StaticServer] Served ${assetRelativePath} for pt-br — text tags PATCHED. Matched strings (${result.matchedStrings.length}): ${result.matchedStrings.map((s) => JSON.stringify(s)).join(', ')}`);
+                } else {
+                    console.log(`[StaticServer] Served ${assetRelativePath} for pt-br — NO text tag matches found, serving raw file unchanged.`);
+                }
+            } else if (assetName === 'levelshome.swf') {
+                buffer = buildPortugueseExactAssetSwfBuffer(swfPath, BRAZILIAN_PORTUGUESE_LEVELS_HOME_TEXT_REPLACEMENTS);
+                console.log(`[StaticServer] Served ${assetRelativePath} for pt-br with localizedAssets=on (home exact dialogue strings patched).`);
+            } else if (assetName === 'levelssrn.swf') {
+                buffer = buildPortugueseAssetSwfBuffer(swfPath, BRAZILIAN_PORTUGUESE_LEVELS_SRN_REPLACEMENTS);
+                console.log(`[StaticServer] Served ${assetRelativePath} for pt-br with localizedAssets=on (BRM exact strings patched).`);
+            } else if (assetName === 'levelsbt.swf') {
+                buffer = buildPortugueseExactAssetSwfBuffer(swfPath, BRAZILIAN_PORTUGUESE_LEVELS_BT_REPLACEMENTS);
+                console.log(`[StaticServer] Served ${assetRelativePath} for pt-br with localizedAssets=on (Felbridge exact strings patched).`);
+            } else if (assetName === 'levelsch.swf') {
+                buffer = buildPortugueseExactAssetSwfBuffer(swfPath, BRAZILIAN_PORTUGUESE_LEVELS_CH_REPLACEMENTS);
+                console.log(`[StaticServer] Served ${assetRelativePath} for pt-br with localizedAssets=on (Cemetery Hill exact strings patched).`);
+            } else {
+                buffer = fs.readFileSync(swfPath);
+            }
+        } else {
+            buffer = fs.readFileSync(swfPath);
+            if (locale === 'pt-br' && isTutorialLevelsAsset) {
+                console.log(`[StaticServer] Served ${assetRelativePath} for pt-br with localizedAssets=off (raw).`);
+            }
+        }
+        this.localizedAssetSwfCache = { key: cacheKey, buffer };
         return buffer;
     }
 
@@ -135,6 +246,30 @@ export class StaticServer {
             return address.slice('::ffff:'.length);
         }
         return address === '::1' ? '127.0.0.1' : address;
+    }
+
+    private normalizePlayerGender(value: unknown): string | null {
+        const normalized = String(value ?? '').trim().toLowerCase();
+        return normalized === 'male' || normalized === 'female' ? normalized : null;
+    }
+
+    private resolveQueryPlayerGender(req: Request): string | null {
+        return this.normalizePlayerGender(req.query.gender);
+    }
+
+    private resolveReferrerPlayerGender(req: Request): string | null {
+        const referrer = req.headers.referer ?? req.headers.referrer;
+        const rawReferrer = Array.isArray(referrer) ? referrer[0] : referrer;
+        if (typeof rawReferrer !== 'string' || !rawReferrer.trim()) {
+            return null;
+        }
+
+        try {
+            const parsed = new URL(rawReferrer);
+            return this.normalizePlayerGender(parsed.searchParams.get('gender'));
+        } catch (_error) {
+            return null;
+        }
     }
 
     private resolveCookieLocale(req: Request): DungeonBlitzSwfLocale | null {
@@ -236,6 +371,52 @@ export class StaticServer {
         return emails.size === 1 ? [...emails][0] ?? '' : '';
     }
 
+    private resolveSessionPlayerGender(req: Request): string | null {
+        const remoteAddress = this.normalizeRemoteAddress(this.resolveRequesterAddress(req));
+        if (!remoteAddress) {
+            return null;
+        }
+
+        const sessions = Array.from(GlobalState.sessionsByToken.values()).filter((client) => {
+            return this.normalizeRemoteAddress(client.socket.remoteAddress) === remoteAddress;
+        });
+        const activeSessions = sessions.filter((client) => client.playerSpawned);
+        const candidates = activeSessions.length > 0 ? activeSessions : sessions;
+        const genders = new Set(
+            candidates
+                .map((client) => this.normalizePlayerGender(client.character?.gender))
+                .filter((gender): gender is string => Boolean(gender))
+        );
+
+        return genders.size === 1 ? [...genders][0] ?? null : null;
+    }
+
+    private resolveLocalFallbackPlayerGender(): string | null {
+        if (Config.MULTIPLAYER_MODE) {
+            return null;
+        }
+
+        const sessions = Array.from(GlobalState.sessionsByToken.values());
+        const activeSessions = sessions.filter((client) => client.playerSpawned);
+        const candidates = activeSessions.length > 0 ? activeSessions : sessions;
+        const genders = new Set(
+            candidates
+                .map((client) => this.normalizePlayerGender(client.character?.gender))
+                .filter((gender): gender is string => Boolean(gender))
+        );
+
+        return genders.size === 1 ? [...genders][0] ?? null : null;
+    }
+
+    private resolveGameSwzPlayerGender(req: Request): string | null {
+        return (
+            this.resolveQueryPlayerGender(req) ??
+            this.resolveReferrerPlayerGender(req) ??
+            this.resolveSessionPlayerGender(req) ??
+            this.resolveLocalFallbackPlayerGender()
+        );
+    }
+
     private resolveGameSwzLocale(req: Request): DungeonBlitzSwfLocale {
         return (
             this.normalizeLocale(req.query.lang) ??
@@ -302,6 +483,95 @@ export class StaticServer {
         return path.join(cbqDir, 'Game.swz');
     }
 
+    private rotateSwzKey(key: number, shift: number): number {
+        return (((key << (32 - shift)) >>> 0) | (key >>> shift)) >>> 0;
+    }
+
+    private decodeSwz(buffer: Buffer): { initialKey: number; entries: SwzEntry[] } {
+        let offset = 0;
+        const initialKey = buffer.readUInt32BE(offset);
+        offset += 4;
+        let key = initialKey >>> 0;
+        const count = buffer.readUInt32BE(offset);
+        offset += 4;
+
+        const entries: SwzEntry[] = [];
+        for (let entryIndex = 0; entryIndex < count; entryIndex += 1) {
+            const encodedLength = buffer.readUInt32BE(offset);
+            offset += 4;
+            const encoded = Buffer.alloc(encodedLength);
+
+            for (let byteIndex = 0; byteIndex < encodedLength; byteIndex += 1) {
+                const shift = byteIndex & 7;
+                encoded[byteIndex] = buffer[offset] ^ (key & 0xff);
+                offset += 1;
+                key = this.rotateSwzKey(key, shift);
+            }
+
+            const xml = zlib.inflateSync(encoded).toString('utf8');
+            const match = xml.match(/<([A-Za-z0-9_:-]+)/);
+            entries.push({ rootName: match ? match[1] : '', xml });
+        }
+
+        return { initialKey, entries };
+    }
+
+    private encodeSwz(initialKey: number, entries: SwzEntry[]): Buffer {
+        const chunks: Buffer[] = [];
+        const header = Buffer.alloc(8);
+        header.writeUInt32BE(initialKey >>> 0, 0);
+        header.writeUInt32BE(entries.length, 4);
+        chunks.push(header);
+
+        let key = initialKey >>> 0;
+        for (const entry of entries) {
+            const deflated = zlib.deflateSync(Buffer.from(entry.xml, 'utf8'));
+            const encoded = Buffer.alloc(deflated.length);
+
+            for (let byteIndex = 0; byteIndex < deflated.length; byteIndex += 1) {
+                const shift = byteIndex & 7;
+                encoded[byteIndex] = deflated[byteIndex] ^ (key & 0xff);
+                key = this.rotateSwzKey(key, shift);
+            }
+
+            const length = Buffer.alloc(4);
+            length.writeUInt32BE(encoded.length, 0);
+            chunks.push(length, encoded);
+        }
+
+        return Buffer.concat(chunks);
+    }
+
+    private localizePortugueseSwzTextNodesForGender(xml: string, playerGender: string): string {
+        if (!xml.includes('|')) {
+            return xml;
+        }
+
+        return xml.replace(/>([^<>]*\|[^<>]*)</g, (_match, text: string) => {
+            const localized = DialogueTranslationLoader.localizeResolvedText(text, 'pt-br', { playerGender });
+            return `>${localized}<`;
+        });
+    }
+
+    private getGameSwzBufferForRequest(req: Request, locale: DungeonBlitzSwfLocale): Buffer | null {
+        if (locale !== 'pt-br') {
+            return null;
+        }
+
+        const playerGender = this.resolveGameSwzPlayerGender(req);
+        if (!playerGender) {
+            return null;
+        }
+
+        const swzPath = this.getGameSwzPathForLocale(locale);
+        const decoded = this.decodeSwz(fs.readFileSync(swzPath));
+        const entries = decoded.entries.map((entry) => ({
+            ...entry,
+            xml: this.localizePortugueseSwzTextNodesForGender(entry.xml, playerGender)
+        }));
+        return this.encodeSwz(decoded.initialKey, entries);
+    }
+
     private getFlashVersionAssetPath(assetPath: string): string {
         const segments = assetPath.split('/').filter(Boolean);
         if (segments.some((segment) => segment === '..' || segment.includes(path.sep))) {
@@ -314,6 +584,46 @@ export class StaticServer {
         }
 
         return path.join(this.contentDir, 'p', 'cbq', normalizedAssetPath);
+    }
+
+    private getSharedXmlAssetPath(assetPath: string): string {
+        const segments = assetPath.split('/').filter(Boolean);
+        if (segments.some((segment) => segment === '..' || segment.includes(path.sep))) {
+            return path.join(this.contentDir, '..', 'xml', '__invalid__');
+        }
+        return path.resolve(this.contentDir, '..', 'xml', segments.join(path.sep));
+    }
+
+    private getLocalizedXmlBuffer(assetPath: string, locale: DungeonBlitzSwfLocale): Buffer {
+        const basename = path.basename(assetPath).toLowerCase();
+        const xml = fs.readFileSync(assetPath, 'utf8');
+        if (locale !== 'pt-br') {
+            return Buffer.from(xml, 'utf8');
+        }
+
+        let localized = xml;
+        if (basename === 'tooltiptypes.xml') {
+            for (const [oldValue, newValue] of BRAZILIAN_PORTUGUESE_XML_REPLACEMENTS) {
+                localized = localized.replace(oldValue, newValue);
+            }
+        } else if (basename === 'enttypes.xml') {
+            for (const [oldValue, newValue] of BRAZILIAN_PORTUGUESE_ENT_TYPES_XML_REPLACEMENTS) {
+                localized = localized.replace(oldValue, newValue);
+            }
+        } else if (basename === 'leveltypes.xml') {
+            for (const [oldValue, newValue] of BRAZILIAN_PORTUGUESE_LEVEL_TYPES_XML_REPLACEMENTS) {
+                localized = localized.replace(oldValue, newValue);
+            }
+        } else if (basename === 'missiontypes.xml') {
+            // In the original flow this thought belongs to the Mausoleum post-boss
+            // sequence. PT-BR appends it there, so suppress the later accept trigger.
+            localized = localized.replace(
+                /^\s*<ISayOnAccept>\^tI need to seal off the wisps<\/ISayOnAccept>\s*$/gm,
+                ''
+            );
+        }
+
+        return Buffer.from(localized, 'utf8');
     }
 
     private rememberQueryLocale(req: Request, res: Response): void {
@@ -422,23 +732,36 @@ export class StaticServer {
         this.app.get('/p/cbq/Game.swz', (req, res) => {
             const locale = this.resolveGameSwzLocale(req);
             this.rememberQueryLocale(req, res);
-            const swzPath = this.getGameSwzPathForLocale(locale);
+            const genderResolvedSwz = this.getGameSwzBufferForRequest(req, locale);
             res.type('application/x-shockwave-flash');
             res.setHeader('X-DungeonBlitz-Language', locale);
+            if (genderResolvedSwz) {
+                res.setHeader('X-DungeonBlitz-Gender-Resolved', 'true');
+                res.send(genderResolvedSwz);
+                return;
+            }
+
+            const swzPath = this.getGameSwzPathForLocale(locale);
             res.sendFile(swzPath);
         });
 
         this.app.get('/p/:assetVersion/Game.swz', (req, res) => {
             const locale = this.resolveGameSwzLocale(req);
-            const swzPath = this.getGameSwzPathForLocale(locale);
+            const genderResolvedSwz = this.getGameSwzBufferForRequest(req, locale);
             res.type('application/x-shockwave-flash');
             res.setHeader('X-DungeonBlitz-Language', locale);
+            if (genderResolvedSwz) {
+                res.setHeader('X-DungeonBlitz-Gender-Resolved', 'true');
+                res.send(genderResolvedSwz);
+                return;
+            }
+
+            const swzPath = this.getGameSwzPathForLocale(locale);
             res.sendFile(swzPath);
         });
 
         this.app.get('/DungeonBlitzRemote.swf', (req, res) => {
             const locale = this.resolveSwfLocale(req);
-            this.rememberQueryLocale(req, res);
             res.type('application/x-shockwave-flash');
             res.setHeader('X-DungeonBlitz-Language', locale);
             res.send(this.getSelectedSwfBuffer(locale));
@@ -457,9 +780,59 @@ export class StaticServer {
             }
 
             if (assetPath.endsWith('.xml')) {
+                const locale = this.resolveSwfLocale(req);
+                this.rememberQueryLocale(req, res);
                 res.type('application/xml');
+                res.setHeader('X-DungeonBlitz-Language', locale);
+                res.send(this.getLocalizedXmlBuffer(assetPath, locale));
+                return;
             }
             res.sendFile(assetPath);
+        });
+
+        this.app.get('/p/cbp/UI_1.swf', (req, res) => {
+            const locale = this.resolveSwfLocale(req);
+            this.rememberQueryLocale(req, res);
+            res.type('application/x-shockwave-flash');
+            res.setHeader('X-DungeonBlitz-Language', locale);
+            res.setHeader('Cache-Control', 'no-store');
+            res.send(this.getLocalizedAssetSwfBuffer(path.join('p', 'cbp', 'UI_1.swf'), locale));
+        });
+
+        this.app.get(/^\/xml\/.+\.xml$/, (req, res, next) => {
+            const assetPath = this.getSharedXmlAssetPath(req.path.replace(/^\/xml\//, ''));
+            if (!fs.existsSync(assetPath) || !fs.statSync(assetPath).isFile()) {
+                next();
+                return;
+            }
+
+            const locale = this.resolveSwfLocale(req);
+            this.rememberQueryLocale(req, res);
+            res.type('application/xml');
+            res.setHeader('X-DungeonBlitz-Language', locale);
+            res.send(this.getLocalizedXmlBuffer(assetPath, locale));
+        });
+
+        this.app.get(/^\/p\/(?:caa|caf|cam|cbp|cbo|cbq)\/.+\.swf$/, (req, res) => {
+            const locale = this.resolveSwfLocale(req);
+            this.rememberQueryLocale(req, res);
+            res.type('application/x-shockwave-flash');
+            res.setHeader('X-DungeonBlitz-Language', locale);
+            res.setHeader('Cache-Control', 'no-store');
+            res.send(this.getLocalizedAssetSwfBuffer(req.path.replace(/^\//, ''), locale));
+        });
+
+        this.app.get('/DungeonBlitzRemote.swf', (req, res) => {
+            const locale = this.resolveSwfLocale(req);
+            this.rememberQueryLocale(req, res);
+            res.type('application/x-shockwave-flash');
+            res.setHeader('X-DungeonBlitz-Language', locale);
+            res.send(this.getSelectedSwfBuffer(locale));
+        });
+
+        this.app.get('/p/cbq/devSettings.xml', (_req, res) => {
+            res.type('application/xml');
+            res.send(this.renderDevSettings(devSettingsPath));
         });
 
         this.app.get('/api/presence/sessions', (req, res) => {

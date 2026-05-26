@@ -49,6 +49,9 @@ export class EntityHandler {
         'GoblinRiverDungeon',
         'GoblinRiverDungeonHard'
     ]);
+    private static readonly PTBR_ENTITY_CUE_NAMES = new Map<string, string>([
+        ['Captain Gar', 'Capitão Gar']
+    ]);
     private static craftTownTutorialHelperIdsCache: Set<number> | null = null;
 
     private static normalizeIdentityName(value: unknown): string {
@@ -56,6 +59,31 @@ export class EntityHandler {
             .trim()
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, '');
+    }
+
+    private static getDialogueLanguage(client: Client): string {
+        return String(client.character?.dialogueLanguage ?? '').trim().toLowerCase() || 'en';
+    }
+
+    private static localizeEntityCueForClient(client: Client, props: EntityProps): EntityProps {
+        if (EntityHandler.getDialogueLanguage(client) !== 'pt-br') {
+            return props;
+        }
+
+        const characterName = String(props.characterName ?? '').trim();
+        if (!characterName) {
+            return props;
+        }
+
+        const localizedName = EntityHandler.PTBR_ENTITY_CUE_NAMES.get(characterName);
+        if (!localizedName || localizedName === characterName) {
+            return props;
+        }
+
+        return {
+            ...props,
+            characterName: localizedName
+        };
     }
 
     private static getCraftTownTutorialAuthoredHelperIds(): Set<number> {
@@ -1518,8 +1546,9 @@ export class EntityHandler {
              props = Entity.fromNpc(entity);
         }
         
+        const localizedProps = EntityHandler.localizeEntityCueForClient(client, props);
         const serializedProps = {
-            ...props,
+            ...localizedProps,
             // Flash treats nonzero spawn velocity as "hidden until first
             // movement update"; visible seed spawns avoid a join-time gfx race.
             v: 0

@@ -622,7 +622,7 @@ function assertMainMethod561KeepsMaxScaleClamp(swfPath: string): void {
 
 function assertDungeonQuestHelperPrefersDungeonProgress(swfPath: string): void {
     const { abc, instructions } = getInstanceMethodCode(swfPath, 'Game', 'SelectMissionToTrack');
-    const hasDungeonGuard = instructions.some((instruction, index) => {
+    const hasBlindDungeonGuard = instructions.some((instruction, index) => {
         const window = instructions.slice(index, index + 25);
         return (
             instruction.opcode === 0xd0 &&
@@ -637,17 +637,9 @@ function assertDungeonQuestHelperPrefersDungeonProgress(swfPath: string): void {
     });
 
     assert.equal(
-        hasDungeonGuard,
-        true,
-        'Game.SelectMissionToTrack must clear only visual tracked missions in instanced dungeons'
-    );
-    assert.equal(
-        instructions.some((instruction) =>
-            instruction.opcode === 0x2c &&
-            abc.stringValues[instruction.operands[0]?.[1] ?? 0] === 'CraftTownTutorial'
-        ),
-        true,
-        'Game.SelectMissionToTrack must let CraftTownTutorial use normal mission tracker progress'
+        hasBlindDungeonGuard,
+        false,
+        'Game.SelectMissionToTrack must not blindly clear tracked missions in instanced dungeons'
     );
 }
 
