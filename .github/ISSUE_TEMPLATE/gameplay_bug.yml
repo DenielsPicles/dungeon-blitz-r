@@ -1,8 +1,6 @@
 name: Gameplay bug
 description: Report a quest, dungeon, combat, ability, or progression problem.
-title: ""
 labels: ["gameplay"]
-type: Bug
 body:
   - type: dropdown
     id: gameplay_area

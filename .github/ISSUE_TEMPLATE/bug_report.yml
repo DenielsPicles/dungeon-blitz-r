@@ -1,7 +1,5 @@
 name: Bug report
 description: Report a reproducible Dungeon Blitz R problem.
-title: ""
-type: Bug
 body:
   - type: markdown
     attributes:

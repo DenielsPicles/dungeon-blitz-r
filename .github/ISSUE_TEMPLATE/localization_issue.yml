@@ -1,8 +1,6 @@
 name: Localization issue
 description: Report a missing, incorrect, or awkward translation.
-title: ""
 labels: ["localization"]
-type: Bug
 body:
   - type: input
     id: language
