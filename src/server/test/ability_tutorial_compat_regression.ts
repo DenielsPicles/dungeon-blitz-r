@@ -265,12 +265,91 @@ async function testAbilitySpeedupAppliesCompletedRank(): Promise<void> {
     assert.equal(client.sentPackets.some((packet) => packet.id === 0xBF), true);
 }
 
+function prepareSentinelClient(): FakeClient {
+    const client = createClient();
+    client.character.class = 'Paladin';
+    client.character.level = 50;
+    client.character.gold = 1000000;
+    client.character.mammothIdols = 100;
+    client.character.MasterClass = 4;
+    client.character.learnedAbilities = [
+        { abilityID: 20, rank: 1 },
+        { abilityID: 24, rank: 1 },
+        { abilityID: 48, rank: 10 },
+        { abilityID: 50, rank: 10 },
+        { abilityID: 52, rank: 10 },
+        { abilityID: 56, rank: 3 }
+    ];
+    client.character.activeAbilities = [48, 50, 56];
+    client.character.SkillResearch = {};
+    return client;
+}
+
+async function testSentinelFormInstantIdolResearchAppliesRank(): Promise<void> {
+    const client = prepareSentinelClient();
+
+    await withMockedCharacterSave(async () => {
+        await AbilityHandler.handleStartAbilityResearch(client as never, createAbilityStartPacket(56, 4, true));
+    });
+
+    assert.deepEqual(
+        client.character.learnedAbilities.find((ability: any) => ability.abilityID === 56),
+        { abilityID: 56, rank: 4 },
+        'instant idol research should apply the completed Sentinel Form rank immediately'
+    );
+    assert.deepEqual(client.character.SkillResearch, {});
+    assert.equal(client.character.mammothIdols, 48);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xB5), true);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xBF), true);
+}
+
+async function testSentinelFormSpeedupResearchAppliesRank(): Promise<void> {
+    const client = prepareSentinelClient();
+
+    await withMockedCharacterSave(async () => {
+        await AbilityHandler.handleStartAbilityResearch(client as never, createAbilityStartPacket(56, 4));
+        await AbilityHandler.handleSpeedupAbilityResearch(client as never, createSpeedupPacket(52));
+    });
+
+    assert.deepEqual(
+        client.character.learnedAbilities.find((ability: any) => ability.abilityID === 56),
+        { abilityID: 56, rank: 4 },
+        'speeding up Sentinel Form research should persist the upgraded form rank immediately'
+    );
+    assert.deepEqual(client.character.SkillResearch, {});
+    assert.equal(client.character.mammothIdols, 48);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xB5), true);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xBF), true);
+}
+
+async function testSentinelFormInstantIdolResearchInfersMissingSavedRank(): Promise<void> {
+    const client = prepareSentinelClient();
+    client.character.learnedAbilities = client.character.learnedAbilities.filter((ability: any) => ability.abilityID !== 56);
+
+    await withMockedCharacterSave(async () => {
+        await AbilityHandler.handleStartAbilityResearch(client as never, createAbilityStartPacket(56, 2, true));
+    });
+
+    assert.deepEqual(
+        client.character.learnedAbilities.find((ability: any) => ability.abilityID === 56),
+        { abilityID: 56, rank: 2 },
+        'instant idol research should infer a missing Sentinel Form rank before applying the target rank'
+    );
+    assert.deepEqual(client.character.SkillResearch, {});
+    assert.equal(client.character.mammothIdols, 76);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xB5), true);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xBF), true);
+}
+
 async function main(): Promise<void> {
     await testDuplicateTutorialAbilityRequestCompletesWithoutGrantingExtraRank();
     await testDefaultMasterAbilityCanStartRankTwoResearch();
     await testAnyActiveDisciplineSkillCanInferMissingSavedRank();
     await testShadowWalkerDisciplineSkillsCanStartRankTwoResearch();
     await testAbilitySpeedupAppliesCompletedRank();
+    await testSentinelFormInstantIdolResearchAppliesRank();
+    await testSentinelFormSpeedupResearchAppliesRank();
+    await testSentinelFormInstantIdolResearchInfersMissingSavedRank();
     console.log('ability_tutorial_compat_regression: ok');
 }
 
