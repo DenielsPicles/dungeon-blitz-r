@@ -279,6 +279,92 @@ function testStaticServerAliasesVersionedGameSwzRequests(): void {
     assert.equal(gameSwzRoute.route?.methods?.get, true);
 }
 
+function rotateSwzKey(key: number, shift: number): number {
+    return (((key << (32 - shift)) >>> 0) | (key >>> shift)) >>> 0;
+}
+
+function decodeSwzEntries(buffer: Buffer): Map<string, string> {
+    let offset = 0;
+    let key = buffer.readUInt32BE(offset);
+    offset += 4;
+    const count = buffer.readUInt32BE(offset);
+    offset += 4;
+
+    const entries = new Map<string, string>();
+    for (let entryIndex = 0; entryIndex < count; entryIndex += 1) {
+        const encodedLength = buffer.readUInt32BE(offset);
+        offset += 4;
+        const encoded = Buffer.alloc(encodedLength);
+
+        for (let byteIndex = 0; byteIndex < encodedLength; byteIndex += 1) {
+            const shift = byteIndex & 7;
+            encoded[byteIndex] = buffer[offset] ^ (key & 0xff);
+            offset += 1;
+            key = rotateSwzKey(key, shift);
+        }
+
+        const xml = zlib.inflateSync(encoded).toString('utf8');
+        const rootName = xml.match(/<([A-Za-z0-9_:-]+)/)?.[1] ?? `entry-${entryIndex}`;
+        entries.set(rootName, xml);
+    }
+
+    return entries;
+}
+
+function testStaticServerResolvesPortugueseGameSwzGenderFromSession(): void {
+    const server = new StaticServer();
+    const request = {
+        query: { lang: 'pt-br' },
+        headers: {},
+        socket: { remoteAddress: '127.0.0.1' }
+    };
+    const portuguesePath = (server as any).getGameSwzPathForLocale('pt-br') as string;
+    const baseMissionTypes = decodeSwzEntries(fs.readFileSync(portuguesePath)).get('MissionTypes') ?? '';
+
+    assert.equal(
+        baseMissionTypes.includes('Retorne vitorioso|vitoriosa a Felbridge'),
+        true,
+        'Base PT-BR Game.swz should keep gender markers before the request-specific resolver runs'
+    );
+
+    GlobalState.sessionsByToken.set(424242, {
+        socket: { remoteAddress: '127.0.0.1' },
+        playerSpawned: true,
+        character: { dialogueLanguage: 'pt-br', gender: 'Female' }
+    } as never);
+    try {
+        const resolvedBuffer = (server as any).getGameSwzBufferForRequest(request, 'pt-br') as Buffer | null;
+        assert.ok(resolvedBuffer, 'PT-BR Game.swz should be rebuilt when the player gender is known');
+        const resolvedMissionTypes = decodeSwzEntries(resolvedBuffer).get('MissionTypes') ?? '';
+
+        assert.equal(resolvedMissionTypes.includes('Retorne vitoriosa a Felbridge'), true);
+        assert.equal(resolvedMissionTypes.includes('Retorne vitorioso|vitoriosa a Felbridge'), false);
+    } finally {
+        GlobalState.sessionsByToken.delete(424242);
+    }
+}
+
+function testStaticServerResolvesPortugueseGameSwzGenderFromRequestReferrer(): void {
+    const server = new StaticServer();
+    const request = {
+        query: { lang: 'pt-br' },
+        headers: {
+            referer: 'http://localhost:8000/p/cbp/DungeonBlitz.swf?fv=cdb&gv=cdb&lang=pt-br&gender=female'
+        },
+        socket: { remoteAddress: '127.0.0.1' }
+    };
+
+    const resolvedBuffer = (server as any).getGameSwzBufferForRequest(request, 'pt-br') as Buffer | null;
+    assert.ok(
+        resolvedBuffer,
+        'PT-BR Game.swz should be rebuilt from the gender carried by the localized SWF referrer'
+    );
+    const resolvedMissionTypes = decodeSwzEntries(resolvedBuffer).get('MissionTypes') ?? '';
+
+    assert.equal(resolvedMissionTypes.includes('Retorne vitoriosa a Felbridge'), true);
+    assert.equal(resolvedMissionTypes.includes('Retorne vitorioso|vitoriosa a Felbridge'), false);
+}
+
 function testStaticServerAliasesCurrentFlashVersionManifest(): void {
     const server = new StaticServer();
     const manifestPath = (server as any).getFlashVersionAssetPath('/masterFileList.xml') as string;
@@ -300,6 +386,40 @@ function testStaticServerLocalizesPortugueseTooltipXml(): void {
     assert.equal(portugueseXml.includes('Atalho do chat:'), true);
     assert.equal(portugueseXml.includes('Pressione [Enter] para começar'), true);
     assert.equal(portugueseXml.includes('Pressione [Enter] para enviar'), true);
+}
+
+function testStaticServerLocalizesPortugueseEntTypesXml(): void {
+    const server = new StaticServer();
+    const entTypesPath = (server as any).getSharedXmlAssetPath('/EntTypes.xml') as string;
+    const englishXml = ((server as any).getLocalizedXmlBuffer(entTypesPath, 'en') as Buffer).toString('utf8');
+    const portugueseXml = ((server as any).getLocalizedXmlBuffer(entTypesPath, 'pt-br') as Buffer).toString('utf8');
+
+    assert.equal(englishXml.includes('<EntType EntName="CaptainGar" parent="Base">'), true);
+    assert.equal(englishXml.includes('<DisplayName>Capitão Gar</DisplayName>'), false);
+    assert.equal(portugueseXml.includes('<EntType EntName="CaptainGar" parent="Base">'), true);
+    assert.equal(portugueseXml.includes('<DisplayName>Capitão Gar</DisplayName>'), true);
+    assert.equal(portugueseXml.includes('<DisplayName>kaptan Gar</DisplayName>'), false);
+}
+
+function testStaticServerLocalizesPortugueseLevelTypesXml(): void {
+    const server = new StaticServer();
+    const levelTypesPath = (server as any).getSharedXmlAssetPath('/LevelTypes.xml') as string;
+    const englishXml = ((server as any).getLocalizedXmlBuffer(levelTypesPath, 'en') as Buffer).toString('utf8');
+    const portugueseXml = ((server as any).getLocalizedXmlBuffer(levelTypesPath, 'pt-br') as Buffer).toString('utf8');
+
+    assert.equal(englishXml.includes('<DisplayName>dehset Rising Damned</DisplayName>'), true);
+    assert.equal(portugueseXml.includes('<DisplayName>Condenados se Erguem</DisplayName>'), true);
+    assert.equal(portugueseXml.includes('<DisplayName>dehset Rising Damned</DisplayName>'), false);
+}
+
+function testStaticServerRelocatesPortugueseSealWispsThought(): void {
+    const server = new StaticServer();
+    const missionTypesPath = (server as any).getSharedXmlAssetPath('/MissionTypes.xml') as string;
+    const englishXml = ((server as any).getLocalizedXmlBuffer(missionTypesPath, 'en') as Buffer).toString('utf8');
+    const portugueseXml = ((server as any).getLocalizedXmlBuffer(missionTypesPath, 'pt-br') as Buffer).toString('utf8');
+
+    assert.equal(englishXml.includes('<ISayOnAccept>^tI need to seal off the wisps</ISayOnAccept>'), true);
+    assert.equal(portugueseXml.includes('<ISayOnAccept>^tI need to seal off the wisps</ISayOnAccept>'), false);
 }
 
 function testBrowserEmbedFillsViewportWithoutCropping(): void {
@@ -429,16 +549,37 @@ function testStaticServerBuildsLocalizedSwfTextByLocale(): void {
     assert.equal(englishBody.includes(turkishDiscipline), false);
     assert.equal(turkishBody.includes(englishDiscipline), false);
     assert.equal(turkishBody.includes(turkishDiscipline), true);
-    assertBodyIncludesText(portugueseBody, `UI_1.swf?rv=${SWF_RUNTIME_VERSION}`, 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'UI_1.swf', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, `UI_4.swf?rv=${SWF_RUNTIME_VERSION}`, 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'UI_2.swf', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'DB_LOCALIZATION_RELOAD:', 'DungeonBlitz.swf pt-br');
-    assertBodyIncludesText(portugueseBody, 'http://localhost:8000/p/cbp/DungeonBlitz.swf?fv=cbw&gv=cbw&lang=pt-br', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'http://localhost:8000/p/cbp/DungeonBlitz.swf?fv=cbz&gv=cbx&lang=pt-br', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Nível da Masmorra: ', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Limpe a Masmorra', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Missão Disponível', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Missão Completa', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Capitão Fink', 'DungeonBlitz.swf pt-br');
-    assertBodyIncludesText(portugueseBody, 'Prefeito Ristas', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Intendente', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Bem-vindo a ', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Melhorar Construção', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(
+        portugueseBody,
+        'Como você gostaria de pagar para iniciar o upgrade?',
+        'DungeonBlitz.swf pt-br'
+    );
+    assertBodyIncludesText(
+        portugueseBody,
+        'Como você gostaria de pagar para iniciar seu treinamento?',
+        'DungeonBlitz.swf pt-br'
+    );
+    assertBodyIncludesText(
+        portugueseBody,
+        'Como você gostaria de pagar para iniciar o treinamento?',
+        'DungeonBlitz.swf pt-br'
+    );
+    assertBodyIncludesText(portugueseBody, 'Treinar Ponto de Talento', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Treinar Nível de Habilidade', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Ponto de Talento Adquirido - ', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Tutorial Concluído', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Uau! Minha própria incubadora. Talvez quando eu tiver mais experiência...', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Espera, preciso seguir pela bifurcação.', 'DungeonBlitz.swf pt-br');
@@ -449,6 +590,8 @@ function testStaticServerBuildsLocalizedSwfTextByLocale(): void {
     assertBodyIncludesText(portugueseBody, 'Não há jogadores nesta área.', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, '/conv <player>', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Convidar...', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Viajar para', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Masmorra', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Oficiais', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Guilda', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Grupo', 'DungeonBlitz.swf pt-br');
@@ -458,15 +601,29 @@ function testStaticServerBuildsLocalizedSwfTextByLocale(): void {
     assertBodyIncludesText(portugueseBody, '/party', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, '/say', 'DungeonBlitz.swf pt-br');
     assertBodyIncludesText(portugueseBody, 'Talvez o zelador saiba como abrir isso...', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Treinar Pet', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Chocar Ovo', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'http://localhost:8000/p/cbp/DungeonBlitz.swf?fv=cbq&gv=cbp&lang=pt-br', 'DungeonBlitz.swf pt-br');
+    assertBodyExcludesText(portugueseBody, `UI_1.swf?rv=${SWF_RUNTIME_VERSION}`, 'DungeonBlitz.swf pt-br');
+    assertBodyExcludesText(portugueseBody, `UI_2.swf?rv=${SWF_RUNTIME_VERSION}`, 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Baglanti Koptu', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Connection to the\nserver has been lost!', 'DungeonBlitz.swf pt-br');
+    assertBodyExcludesText(
+        portugueseBody,
+        'How would you like to pay to begin the training?',
+        'DungeonBlitz.swf pt-br'
+    );
+    assertBodyExcludesText(portugueseBody, 'Gained Talent Point - ', 'DungeonBlitz.swf pt-br');
+    assertBodyExcludesText(portugueseBody, 'Train Ability Rank', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Gema Lendária', 'DungeonBlitz.swf pt-br');
+    assertBodyIncludesText(portugueseBody, 'Adicionar Catalisador', 'DungeonBlitz.swf pt-br');
+    assertBodyExcludesText(portugueseBody, 'Legendary Charm', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Pantano da Rosa Negra', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Atualizar', 'DungeonBlitz.swf pt-br');
-    assertBodyExcludesText(portugueseBody, 'Viajar para', 'DungeonBlitz.swf pt-br');
+    assertBodyExcludesText(portugueseBody, 'Return to', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Movimento', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Grátis', 'DungeonBlitz.swf pt-br');
-    assertBodyExcludesText(portugueseBody, 'Treinar', 'DungeonBlitz.swf pt-br');
+    assertBodyExcludesText(portugueseBody, 'Train Pet', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Wait, I need to take the fork in the road', 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, "It's right below me", 'DungeonBlitz.swf pt-br');
     assertBodyExcludesText(portugueseBody, 'Maybe that old man knows how to open this...', 'DungeonBlitz.swf pt-br');
@@ -489,12 +646,38 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
     const homeLevelsBody = getSwfBody((server as any).getLocalizedAssetSwfBuffer('p/cbp/LevelsHome.swf', 'pt-br') as Buffer);
     const levelsBody = getSwfBody((server as any).getLocalizedAssetSwfBuffer('p/cbp/LevelsNR.swf', 'pt-br') as Buffer);
     const tutorialLevelsBody = getSwfBody((server as any).getLocalizedAssetSwfBuffer('p/cbp/LevelsTut.swf', 'pt-br') as Buffer);
+    const cemeteryPortugueseBody = getSwfBody((server as any).getLocalizedAssetSwfBuffer('p/cam/LevelsCH.swf', 'pt-br') as Buffer);
+    const cemeteryEnglishBody = getSwfBody((server as any).getLocalizedAssetSwfBuffer('p/cam/LevelsCH.swf', 'en') as Buffer);
+    const cemeteryTurkishBody = getSwfBody((server as any).getLocalizedAssetSwfBuffer('p/cam/LevelsCH.swf', 'tr') as Buffer);
 
     assertSwfTagsWellFormed(uiBody, 'UI_1.swf');
     assertSwfTagsWellFormed(ui4Body, 'UI_4.swf');
     assertSwfTagsWellFormed(homeLevelsBody, 'LevelsHome.swf');
     assertSwfTagsWellFormed(levelsBody, 'LevelsNR.swf');
     assertSwfTagsWellFormed(tutorialLevelsBody, 'LevelsTut.swf');
+    assertSwfTagsWellFormed(cemeteryPortugueseBody, 'LevelsCH.swf pt-br');
+    assertSwfTagsWellFormed(cemeteryEnglishBody, 'LevelsCH.swf en');
+    assertSwfTagsWellFormed(cemeteryTurkishBody, 'LevelsCH.swf tr');
+
+    assertBodyIncludesText(cemeteryPortugueseBody, 'Kamak, Senhor da Matilha', 'LevelsCH.swf pt-br');
+    assertBodyIncludesText(cemeteryPortugueseBody, 'Rafhiu, o Libertador', 'LevelsCH.swf pt-br');
+    assertBodyIncludesText(cemeteryPortugueseBody, 'Dragão Voraz', 'LevelsCH.swf pt-br');
+    assertBodyIncludesText(cemeteryPortugueseBody, 'Nephit, o Grande e Sábio', 'LevelsCH.swf pt-br');
+    assertBodyIncludesText(cemeteryPortugueseBody, 'Nephit, o Terrível', 'LevelsCH.swf pt-br');
+    assertBodyIncludesText(cemeteryPortugueseBody, 'Lorde Tilly', 'LevelsCH.swf pt-br');
+    assertBodyExcludesText(cemeteryPortugueseBody, 'Kamak the Packlord', 'LevelsCH.swf pt-br');
+    assertBodyExcludesText(cemeteryPortugueseBody, 'Rafhiu the Liberator', 'LevelsCH.swf pt-br');
+    assertBodyExcludesText(cemeteryPortugueseBody, 'Ravenous Drake', 'LevelsCH.swf pt-br');
+    assertBodyExcludesText(cemeteryPortugueseBody, 'Nephit the Great and Wise', 'LevelsCH.swf pt-br');
+    assertBodyExcludesText(cemeteryPortugueseBody, 'Nephit the Terrible', 'LevelsCH.swf pt-br');
+    assertBodyIncludesText(cemeteryEnglishBody, 'Kamak the Packlord', 'LevelsCH.swf en');
+    assertBodyIncludesText(cemeteryEnglishBody, 'Ravenous Drake', 'LevelsCH.swf en');
+    assertBodyExcludesText(cemeteryEnglishBody, 'Kamak, Senhor da Matilha', 'LevelsCH.swf en');
+    assertBodyExcludesText(cemeteryEnglishBody, 'Dragão Voraz', 'LevelsCH.swf en');
+    assertBodyExcludesText(cemeteryEnglishBody, 'Rafhiu, o Libertador', 'LevelsCH.swf en');
+    assertBodyIncludesText(cemeteryTurkishBody, 'Kamak the Packlord', 'LevelsCH.swf tr');
+    assertBodyExcludesText(cemeteryTurkishBody, 'Kamak, Senhor da Matilha', 'LevelsCH.swf tr');
+    assertBodyExcludesText(cemeteryTurkishBody, 'Rafhiu, o Libertador', 'LevelsCH.swf tr');
 
     assertBodyExcludesText(uiBody, 'Learn quest information', 'UI_1.swf');
     assertBodyExcludesText(uiBody, 'Home and Hearth', 'UI_1.swf');
@@ -553,8 +736,14 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
     assertBodyIncludesText(ui4Body, 'gemas raras ou lendárias com mais chance', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Criar Gema', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Pegar Gema', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Loja de Símbolos de Prata', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Seus Símbolos:', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'OBTIDO', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Esta é a Torre da sua disciplina', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Treinar Talento', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Treinar Ponto de Talento', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Gastar Ouro', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Gastar Idols', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Estes são Pontos de Talento Livres', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Pedras de Talento', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Treinar Pontos leva tempo e custa ouro', 'UI_4.swf');
@@ -566,12 +755,41 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
     assertBodyIncludesText(ui4Body, 'Clique em "Aplicar" se gostou da escolha', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Aplicar', 'UI_4.swf');
     assertBodyIncludesText(ui4Body, 'Desfazer', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Reforjar Atributo Bônus', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Ficar com Este', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Bônus Atual', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Bônus Lendário', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Troque o atributo bônus de uma gema por outro aleatório da lista abaixo.', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Você nunca reforjará o mesmo atributo', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Chance de criar uma gema rara', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Chance de criar uma gema lendária', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Escolha um Catalisador', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Catalisador', 'UI_4.swf');
+    assertBodyIncludesText(ui4Body, 'Reforjar', 'UI_4.swf');
+    assert.deepEqual(
+        collectSpriteCharacterPlacements(ui4Body, 2948, [2947]).get(2947),
+        { tx: -441, ty: -216 }
+    );
+    assert.deepEqual(
+        collectSpriteCharacterPlacements(ui4Body, 3953, [3952]).get(3952),
+        { tx: -168, ty: 205 }
+    );
     assertBodyExcludesText(ui4Body, 'The Magic Forge', 'UI_4.swf');
     assertBodyExcludesText(ui4Body, 'Visit House', 'UI_4.swf');
     assertBodyExcludesText(ui4Body, 'Craft Charm', 'UI_4.swf');
     assertBodyExcludesText(ui4Body, 'Take Charm', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Silver Sigil Store', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Your Silver Sigil:', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'OWNED', 'UI_4.swf');
     assertBodyExcludesText(ui4Body, 'Discipline Towers', 'UI_4.swf');
     assertBodyExcludesText(ui4Body, 'Train Talent Point', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Reforge Bonus Property', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Keep This One', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Current Bonus', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Legendary Bonus', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Choose a Catalyst', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Chance to craft a rare charm', 'UI_4.swf');
+    assertBodyExcludesText(ui4Body, 'Chance to craft a legendary charm', 'UI_4.swf');
     assertBodyExcludesText(ui4Body, 'These are Talentstones', 'UI_4.swf');
     assertBodyExcludesText(ui4Body, 'selected Talentstone', 'UI_4.swf');
     assertBodyIncludesText(homeLevelsBody, 'Seja bem-vindo,|bem-vinda, guerreiro.|guerreira. Aproveite o Salão da Guilda.', 'LevelsHome.swf');
@@ -640,6 +858,8 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
         'BÔNUS DE TEMPO',
         'PONTUAÇÃO TOTAL',
         'Ver Ranques',
+        'Viajar para',
+        'Masmorra',
         'RANQUE',
         'Pântano da Rosa Negra'
     ]) {
@@ -652,7 +872,7 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
     assertBodyExcludesText(uiBody, 'View Ranks', 'UI_1.swf');
     assertBodyExcludesText(uiBody, 'Pantano da Rosa Negra', 'UI_1.swf');
 
-    const cardTitleBounds = collectDefineEditTextXMax(uiBody, [85, 179, 180, 187, 431, 439, 482, 485, 493, 556, 558, 560, 625, 1136, 1141, 1271, 1272, 1287, 1288, 1289, 1290, 1291, 1303, 1305]);
+    const cardTitleBounds = collectDefineEditTextXMax(uiBody, [85, 179, 180, 187, 431, 439, 482, 485, 493, 556, 558, 560, 625, 1109, 1125, 1134, 1136, 1139, 1141, 1271, 1272, 1287, 1288, 1289, 1290, 1291, 1303, 1305, 2581, 2594, 2617]);
     assert.ok(Number(cardTitleBounds.get(85) ?? 0) >= 4400);
     assert.ok(Number(cardTitleBounds.get(179) ?? 0) > 0);
     assert.ok(Number(cardTitleBounds.get(179) ?? 0) >= 6400);
@@ -668,8 +888,12 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
     assert.ok(Number(cardTitleBounds.get(558) ?? 0) >= 7200);
     assert.ok(Number(cardTitleBounds.get(560) ?? 0) >= 7200);
     assert.ok(Number(cardTitleBounds.get(625) ?? 0) >= 5100);
-    assert.ok(Number(cardTitleBounds.get(1136) ?? 0) >= 5600);
-    assert.ok(Number(cardTitleBounds.get(1141) ?? 0) >= 5600);
+    assert.ok(Number(cardTitleBounds.get(1109) ?? 0) >= 6500);
+    assert.ok(Number(cardTitleBounds.get(1125) ?? 0) >= 6500);
+    assert.ok(Number(cardTitleBounds.get(1134) ?? 0) >= 6500);
+    assert.ok(Number(cardTitleBounds.get(1136) ?? 0) >= 3300);
+    assert.ok(Number(cardTitleBounds.get(1139) ?? 0) >= 6500);
+    assert.ok(Number(cardTitleBounds.get(1141) ?? 0) >= 3300);
     assert.ok(Number(cardTitleBounds.get(1271) ?? 0) >= 3800);
     assert.ok(Number(cardTitleBounds.get(1272) ?? 0) >= 1600);
     assert.ok(Number(cardTitleBounds.get(1287) ?? 0) >= 1600);
@@ -679,9 +903,13 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
     assert.ok(Number(cardTitleBounds.get(1291) ?? 0) >= 3400);
     assert.ok(Number(cardTitleBounds.get(1303) ?? 0) >= 2700);
     assert.ok(Number(cardTitleBounds.get(1305) ?? 0) >= 3820);
-
-    const ui4TooltipBounds = collectDefineEditTextXMax(ui4Body, [375, 644, 645, 655, 656, 666, 667, 688, 689, 1001, 1015, 1702, 2019, 2023, 2027, 2038, 2320, 4000]);
+    assert.ok(Number(cardTitleBounds.get(2581) ?? 0) >= 2600);
+    assert.ok(Number(cardTitleBounds.get(2594) ?? 0) >= 2200);
+    assert.ok(Number(cardTitleBounds.get(2617) ?? 0) >= 2600);
+    const ui4TooltipBounds = collectDefineEditTextXMax(ui4Body, [375, 592, 598, 644, 645, 655, 656, 666, 667, 688, 689, 1001, 1015, 1702, 2019, 2023, 2027, 2038, 2320, 3952, 4000]);
     assert.ok(Number(ui4TooltipBounds.get(375) ?? 0) >= 8400);
+    assert.ok(Number(ui4TooltipBounds.get(592) ?? 0) >= 3900);
+    assert.ok(Number(ui4TooltipBounds.get(598) ?? 0) >= 3900);
     assert.ok(Number(ui4TooltipBounds.get(644) ?? 0) >= 7600);
     assert.ok(Number(ui4TooltipBounds.get(645) ?? 0) >= 8200);
     assert.ok(Number(ui4TooltipBounds.get(655) ?? 0) >= 7600);
@@ -698,7 +926,10 @@ function testStaticServerLocalizesPortugueseTutorialAssetTags(): void {
     assert.ok(Number(ui4TooltipBounds.get(2027) ?? 0) >= 3200);
     assert.ok(Number(ui4TooltipBounds.get(2038) ?? 0) >= 4600);
     assert.ok(Number(ui4TooltipBounds.get(2320) ?? 0) >= 8200);
+    assert.ok(Number(ui4TooltipBounds.get(3952) ?? 0) >= 4080);
     assert.ok(Number(ui4TooltipBounds.get(4000) ?? 0) >= 8200);
+    const talentTrainingTitlePlacement = collectSpriteCharacterPlacements(ui4Body, 4001, [4000]).get(4000);
+    assert.equal(talentTrainingTitlePlacement?.tx, -861);
 
     for (const [spriteId, characterId, expectedTx] of [
         [586, 577, -429],
@@ -741,8 +972,13 @@ function main(): void {
     testStaticServerRootServesIndexHtml();
     testStaticServerSelectsLocalizedGameSwz();
     testStaticServerAliasesVersionedGameSwzRequests();
+    testStaticServerResolvesPortugueseGameSwzGenderFromSession();
+    testStaticServerResolvesPortugueseGameSwzGenderFromRequestReferrer();
     testStaticServerAliasesCurrentFlashVersionManifest();
     testStaticServerLocalizesPortugueseTooltipXml();
+    testStaticServerLocalizesPortugueseEntTypesXml();
+    testStaticServerLocalizesPortugueseLevelTypesXml();
+    testStaticServerRelocatesPortugueseSealWispsThought();
     testBrowserEmbedFillsViewportWithoutCropping();
     testStaticServerResolvesGameSwzLocaleFromRequest();
     testStaticServerRemembersQueryLocaleInCookie();
