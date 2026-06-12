@@ -721,7 +721,7 @@ export class GameData {
         return GameData.DYES.find((dye) => dye.id === dyeId)?.color ?? null;
     }
 
-    static getRandomDyeId(allowedRarities?: Iterable<string>): number {
+    static getRandomDyeId(allowedRarities?: Iterable<string>, excludedDyeIds?: Iterable<number | string>): number {
         if (!Array.isArray(GameData.DYES) || GameData.DYES.length === 0) {
             return 0;
         }
@@ -736,9 +736,22 @@ export class GameData {
             }
         }
 
+        const excluded = new Set<number>();
+        if (excludedDyeIds) {
+            for (const dyeId of excludedDyeIds) {
+                const normalized = Number(dyeId);
+                if (Number.isFinite(normalized) && normalized > 0) {
+                    excluded.add(Math.round(normalized));
+                }
+            }
+        }
+
         const pool = allowed.size > 0
-            ? GameData.DYES.filter((dye) => allowed.has(String(dye.rarity).toUpperCase()))
-            : GameData.DYES;
+            ? GameData.DYES.filter((dye) => allowed.has(String(dye.rarity).toUpperCase()) && !excluded.has(dye.id))
+            : GameData.DYES.filter((dye) => !excluded.has(dye.id));
+        if (pool.length === 0) {
+            return 0;
+        }
         return pool[Math.floor(Math.random() * pool.length)]?.id ?? 0;
     }
 
