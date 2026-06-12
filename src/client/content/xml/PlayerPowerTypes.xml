@@ -47069,7 +47069,7 @@
 		<CastTime>400</CastTime>
 		<RecoverTime>500</RecoverTime>
 		<CoolDownTime>0</CoolDownTime>
-		<ManaCost>30</ManaCost>
+		<ManaCost>25</ManaCost>
 		<BaseDamageMult>3.48</BaseDamageMult>
 		<ProcModifier>1</ProcModifier>
 		<DamageType>Physical</DamageType>
