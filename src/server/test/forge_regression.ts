@@ -526,8 +526,10 @@ async function testCompletedTutorialStartForgeDoesNotStoreTutorialFreeSpeedup():
     assert.ok(Number(client.character.magicForge?.ReadyTime ?? 0) > Math.floor(Date.now() / 1000) + 180);
 }
 
-async function testRespecStoneRejectsZeroCostInFreeWindow(): Promise<void> {
+async function testRespecStoneZeroCostPacketUsesAuthoritativeThreeDaySpeedupCost(): Promise<void> {
     const client = createClient();
+    client.character.mammothIdols = 300;
+    const now = Math.floor(Date.now() / 1000);
     client.character.magicForge = {
         stats_by_building: { '2': 5 },
         primary: CharmID.RespecStone,
@@ -544,14 +546,17 @@ async function testRespecStoneRejectsZeroCostInFreeWindow(): Promise<void> {
         await ForgeHandler.handleForgeSpeedUpPacket(client as never, createForgeSpeedupPacket(0));
     });
 
-    assert.equal(client.character.mammothIdols, 20);
-    assert.notEqual(client.character.magicForge?.ReadyTime, 0);
-    assert.equal(client.sentPackets.some((packet) => packet.id === 0xB5), false);
-    assert.equal(client.sentPackets.some((packet) => packet.id === 0xCD), false, 'Respec Stone zero-cost speedup should not bypass its 3 day duration');
+    assert.equal(client.character.mammothIdols, 84);
+    assert.equal(client.character.magicForge?.ReadyTime, 0);
+    assert.equal((client.character.magicForge as any)?.respec_duration_seconds, 259200);
+    assert.ok(Number((client.character.magicForge as any)?.respec_started_time ?? 0) >= now);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xB5), true, 'Respec Stone stale free speedup should charge the authoritative 3 day cost');
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xCD), true, 'Respec Stone speedup should complete after charging the authoritative 3 day cost');
 }
 
-async function testRespecStoneRejectsPaidSpeedupBeforeReady(): Promise<void> {
+async function testRespecStonePaidPacketUsesAuthoritativeThreeDaySpeedupCost(): Promise<void> {
     const client = createClient();
+    client.character.mammothIdols = 300;
     client.character.magicForge = {
         stats_by_building: { '2': 5 },
         primary: CharmID.RespecStone,
@@ -568,10 +573,10 @@ async function testRespecStoneRejectsPaidSpeedupBeforeReady(): Promise<void> {
         await ForgeHandler.handleForgeSpeedUpPacket(client as never, createForgeSpeedupPacket(3));
     });
 
-    assert.equal(client.character.mammothIdols, 20);
-    assert.notEqual(client.character.magicForge?.ReadyTime, 0);
-    assert.equal(client.sentPackets.some((packet) => packet.id === 0xCD), false, 'Respec Stone paid speedup should not bypass its 3 day duration');
-    assert.equal(client.sentPackets.some((packet) => packet.id === 0xB5), false, 'blocked Respec Stone speedup should not charge idols');
+    assert.equal(client.character.mammothIdols, 84);
+    assert.equal(client.character.magicForge?.ReadyTime, 0);
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xCD), true, 'Respec Stone paid speedup should complete after charging the authoritative 3 day cost');
+    assert.equal(client.sentPackets.some((packet) => packet.id === 0xB5), true, 'Respec Stone speedup should emit an idol purchase using the authoritative cost');
 }
 
 async function testForgeSpeedupZeroCostAfterReadySendsCompletedResult(): Promise<void> {
@@ -773,8 +778,8 @@ async function main(): Promise<void> {
     await testTutorialCharmForgeSpeedupAcceptsZeroCostBeforeFreeBoundary();
     await testCompletedTutorialCharmForgeRejectsZeroCostBeforeFreeBoundary();
     await testCompletedTutorialStartForgeDoesNotStoreTutorialFreeSpeedup();
-    await testRespecStoneRejectsZeroCostInFreeWindow();
-    await testRespecStoneRejectsPaidSpeedupBeforeReady();
+    await testRespecStoneZeroCostPacketUsesAuthoritativeThreeDaySpeedupCost();
+    await testRespecStonePaidPacketUsesAuthoritativeThreeDaySpeedupCost();
     await testForgeSpeedupZeroCostAfterReadySendsCompletedResult();
     await testCollectForgeCharmAwardsCharmAndCraftXp();
     await testForgeRerollPreservesTierAndUpdatesUsedlist();
