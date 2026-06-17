@@ -38,6 +38,7 @@ type FakeClient = {
     characters?: any[];
     entities: Map<number, unknown>;
     sentPackets: SentPacket[];
+    armPendingTransferGrace: () => void;
     send: (id: number, payload: Buffer) => void;
     sendBitBuffer: (id: number, bb: BitBuffer) => void;
 };
@@ -86,6 +87,7 @@ function createFakeClient(): FakeClient {
         },
         entities: new Map(),
         sentPackets,
+        armPendingTransferGrace(): void {},
         send(id: number, payload: Buffer): void {
             sentPackets.push({ id, payload: Buffer.from(payload) });
         },
@@ -275,6 +277,88 @@ function createValhavenDungeonChainClient(
     client.character.questTrackerState = 100;
     client.sentPackets.length = 0;
     seedDefeatedValhavenBosses(client, currentLevel.endsWith('Hard'));
+    return client;
+}
+
+function createMausoleumChainClient(): FakeClient {
+    const client = createFakeClient();
+    client.currentLevel = 'CH_Mission6';
+    client.levelInstanceId = 'mausoleum-wise-chain-flow';
+    client.forcedDungeonCompletionScope = 'CH_Mission6#mausoleum-wise-chain-flow';
+    client.character.name = 'MausoleumChainTester';
+    client.character.level = 15;
+    client.character.CurrentLevel = { name: 'CH_Mission6', x: 0, y: 0 };
+    client.character.PreviousLevel = { name: 'CemeteryHill', x: 24217, y: -1988 };
+    client.character.missions = {
+        [String(MissionID.DeliverToSwamp)]: {
+            state: 3,
+            currCount: 1,
+            claimed: 1,
+            complete: 1
+        },
+        [String(MissionID.FindTheOutpost)]: {
+            state: 3,
+            currCount: 1,
+            claimed: 1,
+            complete: 1
+        },
+        [String(MissionID.JackalTreasure)]: {
+            state: 3,
+            currCount: 1,
+            claimed: 1,
+            complete: 1
+        },
+        [String(MissionID.RescueYagaga)]: {
+            state: 3,
+            currCount: 1,
+            claimed: 1,
+            complete: 1
+        },
+        [String(MissionID.DestroyTheIdol)]: {
+            state: 3,
+            currCount: 1,
+            claimed: 1,
+            complete: 1
+        },
+        [String(MissionID.DefeatCrovnag)]: {
+            state: 3,
+            currCount: 1,
+            claimed: 1,
+            complete: 1
+        },
+        [String(MissionID.DiscoverSecret)]: {
+            state: 1,
+            currCount: 0
+        }
+    };
+    client.character.questTrackerState = 100;
+    client.sentPackets.length = 0;
+    return client;
+}
+
+function createMouthOfMeylourChainClient(): FakeClient {
+    const client = createFakeClient();
+    client.currentLevel = 'BT_Mission3';
+    client.levelInstanceId = 'mouth-meylour-chain-flow';
+    client.forcedDungeonCompletionScope = 'BT_Mission3#mouth-meylour-chain-flow';
+    client.character.name = 'MouthMeylourChainTester';
+    client.character.level = 14;
+    client.character.CurrentLevel = { name: 'BT_Mission3', x: 0, y: 0 };
+    client.character.PreviousLevel = { name: 'BridgeTown', x: 13666, y: 500 };
+    client.character.missions = {
+        [String(MissionID.DeliverToSwamp)]: {
+            state: 3,
+            currCount: 1,
+            claimed: 1,
+            complete: 1
+        },
+        [String(MissionID.MouthOfMeylour)]: {
+            state: 1,
+            currCount: 0
+        }
+    };
+    client.character.questTrackerState = 100;
+    client.sentPackets.length = 0;
     return client;
 }
 
@@ -724,6 +808,88 @@ async function testValhavenDungeonChainAutoAcceptsProdigalSon(): Promise<void> {
     }
 }
 
+async function testMausoleumCompletionAutoAcceptsRisingDamned(): Promise<void> {
+    const client = createMausoleumChainClient();
+
+    await MissionHandler.handleSetLevelComplete(client as never, createLevelCompletePacket(100, 0, 1));
+
+    assert.equal(
+        Number(client.character.missions[String(MissionID.DiscoverSecret)]?.state ?? 0),
+        3,
+        'Mausoleum of the Wise should be claimed when the dungeon completes'
+    );
+    assert.equal(
+        Number(client.character.missions[String(MissionID.SealTheWisps)]?.state ?? 0),
+        1,
+        'Mausoleum of the Wise completion should auto-accept Rising Damned'
+    );
+
+    const followupAdded = client.sentPackets.find((packet) => {
+        if (packet.id !== 0x85) {
+            return false;
+        }
+        return decodeMissionAddedPacket(packet.payload).missionId === MissionID.SealTheWisps;
+    });
+    assert.ok(followupAdded, 'Rising Damned should be pushed to the client after Mausoleum completes');
+    assert.deepEqual(decodeMissionAddedPacket(followupAdded!.payload), {
+        missionId: MissionID.SealTheWisps,
+        active: 1
+    });
+}
+
+async function testMouthCompletionAutoAcceptsDerelictionAndReturnsToDoor(): Promise<void> {
+    const client = createMouthOfMeylourChainClient();
+
+    await MissionHandler.handleSetLevelComplete(client as never, createLevelCompletePacket(100, 0, 1));
+
+    assert.equal(
+        Number(client.character.missions[String(MissionID.MouthOfMeylour)]?.state ?? 0),
+        3,
+        'Mouth of Meylour should be claimed when the dungeon completes'
+    );
+    assert.equal(
+        Number(client.character.missions[String(MissionID.DerelictionOfDuty)]?.state ?? 0),
+        1,
+        'Mouth of Meylour completion should auto-accept Dereliction of Duty'
+    );
+    const pendingTeleport = GlobalState.pendingTeleports.get(client.token);
+    assert.deepEqual(
+        pendingTeleport,
+        { targetLevel: 'BridgeTown', x: 9361, y: 482, hasCoord: true },
+        'Mouth of Meylour completion should prime the Dereliction of Duty entrance for Exit Dungeon'
+    );
+
+    const followupAdded = client.sentPackets.find((packet) => {
+        if (packet.id !== 0x85) {
+            return false;
+        }
+        return decodeMissionAddedPacket(packet.payload).missionId === MissionID.DerelictionOfDuty;
+    });
+    assert.ok(followupAdded, 'Dereliction of Duty should be pushed to the client after Mouth completes');
+    assert.deepEqual(decodeMissionAddedPacket(followupAdded!.payload), {
+        missionId: MissionID.DerelictionOfDuty,
+        active: 1
+    });
+
+    const syncState = (LevelHandler as any).buildTransferSyncState(
+        client,
+        'BridgeTown',
+        pendingTeleport
+    );
+    const exitSpawn = (LevelHandler as any).resolveDungeonExitSpawn(
+        client,
+        client.character,
+        'BT_Mission3',
+        'BridgeTown',
+        syncState
+    );
+    assert.deepEqual(
+        exitSpawn,
+        { x: 9361, y: 482, hasCoord: true },
+        'Exit Dungeon should use the Mouth follow-up teleport instead of the original Mouth entrance'
+    );
+}
+
 function testLoginRepairAcceptsMissingValhavenDungeonChainQuest(): void {
     const cases: Array<{
         currentLevel: string;
@@ -960,6 +1126,7 @@ async function testStormshardFullClearDungeonsAcceptHundredPercentPacket(): Prom
 async function main(): Promise<void> {
     const sessionsByToken = new Map(GlobalState.sessionsByToken);
     const levelEntities = new Map(GlobalState.levelEntities);
+    const pendingTeleports = new Map(GlobalState.pendingTeleports);
     ensureDataLoaded();
     try {
         await testDungeonCompletionSyncsReadyMissionStateImmediately();
@@ -968,6 +1135,8 @@ async function main(): Promise<void> {
         await testAcceptedForgottenForgeCompletionWaitsForTurnIn();
         await testAcceptedForgottenForgeHardCompletionWaitsForTurnIn();
         await testValhavenDungeonChainAutoAcceptsProdigalSon();
+        await testMausoleumCompletionAutoAcceptsRisingDamned();
+        await testMouthCompletionAutoAcceptsDerelictionAndReturnsToDoor();
         testLoginRepairAcceptsMissingValhavenDungeonChainQuest();
         await testMeyloursEmbersClaimsAdohiRewardAndPrimesGlades();
         GlobalState.sessionsByToken.clear();
@@ -981,6 +1150,7 @@ async function main(): Promise<void> {
     } finally {
         GlobalState.sessionsByToken = sessionsByToken;
         GlobalState.levelEntities = levelEntities;
+        GlobalState.pendingTeleports = pendingTeleports;
     }
     console.log('dungeon_completion_mission_sync_regression: ok');
 }

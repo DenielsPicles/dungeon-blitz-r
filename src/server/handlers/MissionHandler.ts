@@ -82,6 +82,12 @@ type DungeonCompletionObjectiveProgress = {
     requiredChestDestroyed: boolean;
 };
 
+type DungeonFollowupReturnOverride = {
+    level: string;
+    x: number;
+    y: number;
+};
+
 export class MissionHandler {
     private static readonly MISSION_NOT_STARTED = 0;
     private static readonly MISSION_IN_PROGRESS = 1;
@@ -115,6 +121,15 @@ export class MissionHandler {
     private static readonly PRIMED_CONTACT_DIALOGUE_COUNT = -1;
     private static readonly ACHIEVEMENT_MAMMOTH_IDOL_REWARD = 10;
     private static readonly CRAFT_TOWN_REPAIRED_KEEP_RANK = 5;
+    private static readonly DUNGEON_COMPLETION_FOLLOWUP_MISSIONS = new Map<number, number>([
+        [MissionID.MouthOfMeylour, MissionID.DerelictionOfDuty],
+        [MissionID.MouthOfMeylourHard, MissionID.DerelictionOfDutyHard],
+        [MissionID.DiscoverSecret, MissionID.SealTheWisps]
+    ]);
+    private static readonly DUNGEON_COMPLETION_FOLLOWUP_RETURN_OVERRIDES = new Map<number, DungeonFollowupReturnOverride>([
+        [MissionID.MouthOfMeylour, { level: 'BridgeTown', x: 9361, y: 482 }],
+        [MissionID.MouthOfMeylourHard, { level: 'BridgeTownHard', x: 9361, y: 482 }]
+    ]);
     private static readonly CRAFT_TOWN_TUTORIAL_BOSS_NAMES = new Set([
         'GoblinShamanHood',
         'IntroGoblinShamanHood'
@@ -1520,6 +1535,9 @@ export class MissionHandler {
                 );
                 if (chainedDungeonMissionId > 0) {
                     didMutate = true;
+                    if (MissionHandler.applyDungeonCompletionFollowupReturnOverride(client, completedMissionId)) {
+                        didMutate = true;
+                    }
                 }
 
                 const aggregateReconcile = MissionHandler.reconcileAttackOfOpportunityAggregateProgress(client.character);
@@ -2441,12 +2459,13 @@ export class MissionHandler {
         }
 
         const nextLevel = LevelConfig.normalizeLevelName(LevelConfig.getDoorTarget(normalizedCurrentLevel, 2));
-        if (!nextLevel || !LevelConfig.isDungeonLevel(nextLevel)) {
-            return 0;
-        }
-
         const completedMissionDef = MissionLoader.getMissionDef(completedMissionId);
-        const followupMissionDef = MissionLoader.findPrimaryMissionByDungeon(nextLevel);
+        const explicitFollowupMissionId = MissionHandler.DUNGEON_COMPLETION_FOLLOWUP_MISSIONS.get(completedMissionId) ?? 0;
+        const followupMissionDef = explicitFollowupMissionId
+            ? MissionLoader.getMissionDef(explicitFollowupMissionId)
+            : nextLevel && LevelConfig.isDungeonLevel(nextLevel)
+                ? MissionLoader.findPrimaryMissionByDungeon(nextLevel)
+                : undefined;
         if (!completedMissionDef || !followupMissionDef) {
             return 0;
         }
@@ -2477,6 +2496,45 @@ export class MissionHandler {
         );
         MissionHandler.sendMissionAdded(client, followupMissionId, initialState);
         return followupMissionId;
+    }
+
+    private static applyDungeonCompletionFollowupReturnOverride(
+        client: Client,
+        completedMissionId: number
+    ): boolean {
+        if (!client.character) {
+            return false;
+        }
+
+        const override = MissionHandler.DUNGEON_COMPLETION_FOLLOWUP_RETURN_OVERRIDES.get(completedMissionId);
+        if (!override) {
+            return false;
+        }
+
+        const token = Math.round(Number(client.token ?? 0));
+        if (token <= 0) {
+            return false;
+        }
+
+        const pendingOverride = GlobalState.pendingTeleports.get(token);
+        if (
+            pendingOverride?.targetLevel === override.level &&
+            pendingOverride.x === override.x &&
+            pendingOverride.y === override.y
+        ) {
+            return false;
+        }
+
+        GlobalState.pendingTeleports.set(token, {
+            targetLevel: override.level,
+            x: override.x,
+            y: override.y,
+            hasCoord: true
+        });
+        client.lastDoorId = 0;
+        client.lastDoorTargetLevel = override.level;
+        client.armPendingTransferGrace();
+        return true;
     }
 
     private static autoAcceptFollowupMission(
