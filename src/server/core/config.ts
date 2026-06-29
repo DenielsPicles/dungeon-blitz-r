@@ -196,6 +196,7 @@ export const Config = {
     MONGODB_URI,
     MONGODB_DB_NAME: parseStringEnv('MONGODB_DB_NAME', 'dungeon_blitz_r'),
     MONGODB_WALLET_COLLECTION: parseStringEnv('MONGODB_WALLET_COLLECTION', 'wallets'),
+    MONGO_WALLET_FLUSH_INTERVAL_MS: parseNumberEnv('MONGO_WALLET_FLUSH_INTERVAL_MS', 5000),
     ENABLE_MONGO_WALLET: parseBooleanEnv('ENABLE_MONGO_WALLET', Boolean(MONGODB_URI)),
     SECRET: resolveRuntimeKeyHex(),
     DATA_DIR: resolveServerDataDir()

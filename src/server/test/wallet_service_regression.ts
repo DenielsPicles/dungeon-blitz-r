@@ -1,5 +1,6 @@
 import { strict as assert } from 'assert';
 import { Character } from '../database/Database';
+import { WalletJournalDeltaEntry, WalletJournalStore } from '../database/WalletJournal';
 import { WalletPersistenceAdapter } from '../database/MongoWalletAdapter';
 import { WalletService } from '../database/WalletService';
 import {
@@ -81,6 +82,32 @@ class MemoryWalletAdapter implements WalletPersistenceAdapter {
     }
 }
 
+class MemoryWalletJournal implements WalletJournalStore {
+    readonly appended: WalletJournalDeltaEntry[] = [];
+    readonly flushedIds: string[] = [];
+
+    constructor(private readonly pending: WalletJournalDeltaEntry[] = []) {}
+
+    async appendDelta(entry: WalletJournalDeltaEntry): Promise<void> {
+        this.appended.push(entry);
+        this.pending.push(entry);
+    }
+
+    async markFlushed(ids: string[]): Promise<void> {
+        this.flushedIds.push(...ids);
+        const idSet = new Set(ids);
+        for (let index = this.pending.length - 1; index >= 0; index -= 1) {
+            if (idSet.has(this.pending[index].id)) {
+                this.pending.splice(index, 1);
+            }
+        }
+    }
+
+    async loadPending(): Promise<WalletJournalDeltaEntry[]> {
+        return [...this.pending];
+    }
+}
+
 function createCharacter(): Character {
     return {
         name: 'WalletHero',
@@ -135,25 +162,23 @@ async function testLoadWalletOverlay(): Promise<void> {
     assert.deepEqual(character.lockboxes, [{ lockboxID: 1, count: 9 }], 'Mongo lockbox counts should overlay stale JSON lockboxes');
 }
 
-async function testDiscordStyleWalletIdentity(): Promise<void> {
+async function testMinimalWalletDocumentShape(): Promise<void> {
     const adapter = new MemoryWalletAdapter();
-    const discordUserId = '285118390031351809';
-    WalletService.configureForTests(
-        adapter,
-        true,
-        async (gameUserId) => createWalletOwnerIdentity(gameUserId, discordUserId)
-    );
+    WalletService.configureForTests(adapter, true);
     const character = createCharacter();
 
     await WalletService.overlayWallet(44, character);
-    const document = adapter.getDocument(createWalletOwnerIdentity(44, discordUserId), character.name);
+    const document = adapter.getDocument(createWalletOwnerIdentity(44), character.name);
 
     assert.ok(document, 'wallet document should be created');
+    const rawDocument = document as unknown as Record<string, unknown>;
     assert.equal(document?._id, '44:wallethero', 'wallet _id should be deterministic per game account and character');
-    assert.equal(document?.userId, discordUserId, 'wallet userId should mirror the Discord bot string user id when linked');
     assert.equal(document?.gameUserId, 44, 'wallet should retain the game account id for JSON save compatibility');
-    assert.equal(document?.discordUserId, discordUserId, 'wallet should store the Discord id only, not OAuth token data');
-    assert.equal(document?.identityProvider, 'discord', 'wallet should mark Discord-backed identity');
+    assert.equal(rawDocument.userId, undefined, 'minimal wallet should not store userId');
+    assert.equal(rawDocument.identityProvider, undefined, 'minimal wallet should not store identityProvider');
+    assert.equal(rawDocument.discordUserId, undefined, 'minimal wallet should not store discordUserId');
+    assert.equal(rawDocument.createdAt, undefined, 'minimal wallet should not store createdAt');
+    assert.equal(rawDocument.lastUpdated, undefined, 'minimal wallet should not store lastUpdated');
 }
 
 async function testAtomicSpendSucceedsAndFails(): Promise<void> {
@@ -167,6 +192,58 @@ async function testAtomicSpendSucceedsAndFails(): Promise<void> {
 
     assert.equal(await WalletService.spend({ userId: 44, character }, 'gold', 31), false, 'spend should fail when balance is insufficient');
     assert.equal(character.gold, 30, 'failed spend must leave authoritative balance unchanged');
+}
+
+async function testGoldGrantBuffersUntilFlush(): Promise<void> {
+    const adapter = new MemoryWalletAdapter();
+    const journal = new MemoryWalletJournal();
+    WalletService.configureForTests(adapter, true, async (gameUserId) => createWalletOwnerIdentity(gameUserId), journal);
+    const character = createCharacter();
+    await WalletService.overlayWallet(44, character);
+
+    assert.equal(await WalletService.grant({ userId: 44, character }, 'gold', 25), true, 'gold grant should buffer successfully');
+    assert.equal(character.gold, 125, 'buffered gold grant should update in-memory character immediately');
+    assert.equal(adapter.getDocument(createWalletOwnerIdentity(44), character.name)?.gold, 100, 'Mongo document should not update until flush');
+    assert.equal(journal.appended.length, 1, 'buffered gold grant should be journaled');
+
+    await WalletService.flushWallet({ userId: 44, character });
+
+    assert.equal(adapter.getDocument(createWalletOwnerIdentity(44), character.name)?.gold, 125, 'flush should persist buffered gold');
+    assert.equal(journal.flushedIds.length, 1, 'flush should mark the journal entry flushed');
+}
+
+async function testSpendFlushesBufferedGoldBeforeAtomicCheck(): Promise<void> {
+    const adapter = new MemoryWalletAdapter();
+    const journal = new MemoryWalletJournal();
+    WalletService.configureForTests(adapter, true, async (gameUserId) => createWalletOwnerIdentity(gameUserId), journal);
+    const character = createCharacter();
+    await WalletService.overlayWallet(44, character);
+
+    await WalletService.grant({ userId: 44, character }, 'gold', 25);
+    assert.equal(await WalletService.spend({ userId: 44, character }, 'gold', 120), true, 'spend should see buffered gold after flush');
+
+    assert.equal(character.gold, 5, 'spend should apply after pending grant flush');
+    assert.equal(adapter.getDocument(createWalletOwnerIdentity(44), character.name)?.gold, 5, 'Mongo should contain flushed grant minus spend');
+}
+
+async function testJournalReplayFlushesPendingGold(): Promise<void> {
+    const adapter = new MemoryWalletAdapter();
+    const journal = new MemoryWalletJournal([
+        {
+            id: 'pending-1',
+            gameUserId: 44,
+            characterNameKey: 'wallethero',
+            characterName: 'WalletHero',
+            delta: { gold: 55 },
+            createdAt: new Date().toISOString()
+        }
+    ]);
+    WalletService.configureForTests(adapter, true, async (gameUserId) => createWalletOwnerIdentity(gameUserId), journal);
+
+    await WalletService.initialize();
+
+    assert.equal(adapter.getDocument(createWalletOwnerIdentity(44), 'WalletHero')?.gold, 55, 'startup replay should flush pending journal gold');
+    assert.deepEqual(journal.flushedIds, ['pending-1'], 'startup replay should mark journal entry flushed');
 }
 
 async function testJsonFallbackWhenDisabled(): Promise<void> {
@@ -183,8 +260,11 @@ async function testJsonFallbackWhenDisabled(): Promise<void> {
 async function main(): Promise<void> {
     await testCreateWalletFromExistingCharacter();
     await testLoadWalletOverlay();
-    await testDiscordStyleWalletIdentity();
+    await testMinimalWalletDocumentShape();
     await testAtomicSpendSucceedsAndFails();
+    await testGoldGrantBuffersUntilFlush();
+    await testSpendFlushesBufferedGoldBeforeAtomicCheck();
+    await testJournalReplayFlushesPendingGold();
     await testJsonFallbackWhenDisabled();
     console.log('wallet_service_regression: ok');
 }

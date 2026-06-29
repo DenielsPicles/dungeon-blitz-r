@@ -44,7 +44,6 @@ export class MongoWalletAdapter implements WalletPersistenceAdapter {
         await client.connect();
         const db = client.db(this.dbName);
         const collection = db.collection<WalletDocument>(this.collectionName);
-        await collection.createIndex({ userId: 1, characterNameKey: 1 }, { unique: true });
         await collection.createIndex(
             { gameUserId: 1, characterNameKey: 1 },
             { unique: true, partialFilterExpression: { gameUserId: { $exists: true } } }
@@ -77,7 +76,6 @@ export class MongoWalletAdapter implements WalletPersistenceAdapter {
         const now = new Date();
         const initialDocument = createWalletDocument(identity, character);
         const insertOnlyDocument = {
-            _id: initialDocument._id,
             gold: initialDocument.gold,
             mammothIdols: initialDocument.mammothIdols,
             DragonKeys: initialDocument.DragonKeys,
@@ -85,33 +83,28 @@ export class MongoWalletAdapter implements WalletPersistenceAdapter {
             SilverSigils: initialDocument.SilverSigils,
             RoyalSigils: initialDocument.RoyalSigils,
             lockboxes: initialDocument.lockboxes,
-            version: initialDocument.version,
-            createdAt: initialDocument.createdAt
+            version: initialDocument.version
         };
         const identityUpdate: Record<string, unknown> = {
-            userId: identity.userId,
             gameUserId: identity.gameUserId,
-            identityProvider: identity.identityProvider,
             characterNameKey,
             characterName: String(character.name ?? '').trim(),
-            updatedAt: now,
-            lastUpdated: now.getTime()
+            updatedAt: now
         };
-        if (identity.discordUserId) {
-            identityUpdate.discordUserId = identity.discordUserId;
-        }
-
-        const update: Record<string, unknown> = {
-            $setOnInsert: insertOnlyDocument,
-            $set: identityUpdate
-        };
-        if (!identity.discordUserId) {
-            update.$unset = { discordUserId: '' };
-        }
 
         const result = await this.getCollection().findOneAndUpdate(
             { _id: documentId },
-            update,
+            {
+                $setOnInsert: insertOnlyDocument,
+                $set: identityUpdate,
+                $unset: {
+                    userId: '',
+                    discordUserId: '',
+                    identityProvider: '',
+                    createdAt: '',
+                    lastUpdated: ''
+                }
+            },
             {
                 upsert: true,
                 returnDocument: 'after'
@@ -119,7 +112,7 @@ export class MongoWalletAdapter implements WalletPersistenceAdapter {
         );
 
         if (!result) {
-            throw new Error(`Mongo wallet upsert returned no document for user ${identity.userId}/${characterNameKey}`);
+            throw new Error(`Mongo wallet upsert returned no document for user ${identity.gameUserId}/${characterNameKey}`);
         }
 
         return normalizeWalletDocument(result);
@@ -179,8 +172,7 @@ export class MongoWalletAdapter implements WalletPersistenceAdapter {
 
     private buildDeltaPipeline(delta: WalletDelta): Record<string, unknown>[] {
         const setStage: Record<string, unknown> = {
-            updatedAt: '$$NOW',
-            lastUpdated: { $toLong: '$$NOW' }
+            updatedAt: '$$NOW'
         };
 
         for (const field of WALLET_CURRENCY_FIELDS) {
@@ -211,7 +203,7 @@ export class MongoWalletAdapter implements WalletPersistenceAdapter {
             setStage.lockboxes = lockboxesExpression;
         }
 
-        if (Object.keys(setStage).length === 2 && setStage.updatedAt && setStage.lastUpdated) {
+        if (Object.keys(setStage).length === 1 && setStage.updatedAt) {
             return [];
         }
 

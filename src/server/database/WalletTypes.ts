@@ -34,23 +34,15 @@ export interface WalletSnapshot {
 
 export interface WalletOwnerIdentity {
     gameUserId: number;
-    userId: string;
-    discordUserId?: string;
-    identityProvider: 'discord' | 'game';
 }
 
 export interface WalletDocument extends WalletSnapshot {
     _id: string;
-    userId: string;
     gameUserId: number;
-    discordUserId?: string;
-    identityProvider: 'discord' | 'game';
     characterNameKey: string;
     characterName: string;
     version: number;
-    createdAt: Date;
     updatedAt: Date;
-    lastUpdated: number;
 }
 
 export interface WalletDelta extends WalletCurrencyDelta {
@@ -83,22 +75,13 @@ export function normalizeWalletNumber(value: unknown): number {
     return Math.max(0, Math.round(numeric));
 }
 
-export function normalizeWalletUserId(value: unknown): string {
+function normalizeWalletString(value: unknown): string {
     return String(value ?? '').trim();
 }
 
-export function createWalletOwnerIdentity(
-    gameUserId: number,
-    discordUserId?: string | null
-): WalletOwnerIdentity {
-    const normalizedGameUserId = normalizeWalletNumber(gameUserId);
-    const normalizedDiscordUserId = normalizeWalletUserId(discordUserId);
-
+export function createWalletOwnerIdentity(gameUserId: number): WalletOwnerIdentity {
     return {
-        gameUserId: normalizedGameUserId,
-        userId: normalizedDiscordUserId || String(normalizedGameUserId),
-        discordUserId: normalizedDiscordUserId || undefined,
-        identityProvider: normalizedDiscordUserId ? 'discord' : 'game'
+        gameUserId: normalizeWalletNumber(gameUserId)
     };
 }
 
@@ -161,50 +144,34 @@ export function applyWalletSnapshot(character: Character | null | undefined, wal
 export function createWalletDocument(identity: WalletOwnerIdentity, character: Character): WalletDocument {
     const now = new Date();
     const snapshot = extractWalletSnapshot(character);
-    const normalizedIdentity = createWalletOwnerIdentity(
-        identity.gameUserId,
-        identity.discordUserId ?? (identity.identityProvider === 'discord' ? identity.userId : undefined)
-    );
+    const normalizedIdentity = createWalletOwnerIdentity(identity.gameUserId);
 
     return {
         _id: getWalletDocumentId(normalizedIdentity, character),
-        userId: normalizedIdentity.userId,
         gameUserId: normalizedIdentity.gameUserId,
-        discordUserId: normalizedIdentity.discordUserId,
-        identityProvider: normalizedIdentity.identityProvider,
         characterNameKey: getCharacterNameKey(character),
         characterName: String(character.name ?? '').trim(),
         ...snapshot,
         version: WALLET_DOCUMENT_VERSION,
-        createdAt: now,
-        updatedAt: now,
-        lastUpdated: now.getTime()
+        updatedAt: now
     };
 }
 
 export function normalizeWalletDocument(document: WalletDocument): WalletDocument {
-    const fallbackGameUserId = normalizeWalletNumber(document.gameUserId ?? document.userId);
-    const rawUserId = normalizeWalletUserId(document.userId);
-    const rawDiscordUserId = normalizeWalletUserId(document.discordUserId);
-    const discordUserId = rawDiscordUserId || (document.identityProvider === 'discord' ? rawUserId : '');
-    const identity = createWalletOwnerIdentity(fallbackGameUserId, discordUserId);
+    const legacyDocument = document as WalletDocument & { userId?: unknown };
+    const fallbackGameUserId = normalizeWalletNumber(document.gameUserId ?? legacyDocument.userId);
+    const identity = createWalletOwnerIdentity(fallbackGameUserId);
     const characterNameKey = getCharacterNameKey(document.characterNameKey || document.characterName);
-    const createdAt = document.createdAt instanceof Date ? document.createdAt : new Date(document.createdAt);
     const updatedAt = document.updatedAt instanceof Date ? document.updatedAt : new Date(document.updatedAt);
 
     return {
-        _id: normalizeWalletUserId(document._id) || getWalletDocumentId(identity, characterNameKey),
-        userId: rawUserId || identity.userId,
+        _id: normalizeWalletString(document._id) || getWalletDocumentId(identity, characterNameKey),
         gameUserId: identity.gameUserId,
-        discordUserId: identity.discordUserId,
-        identityProvider: identity.identityProvider,
         characterNameKey,
         characterName: String(document.characterName ?? '').trim(),
         ...extractWalletSnapshot(document as unknown as Character),
         version: Math.max(1, Math.round(Number(document.version ?? WALLET_DOCUMENT_VERSION))),
-        createdAt,
-        updatedAt,
-        lastUpdated: normalizeWalletNumber(document.lastUpdated ?? updatedAt.getTime())
+        updatedAt
     };
 }
 
