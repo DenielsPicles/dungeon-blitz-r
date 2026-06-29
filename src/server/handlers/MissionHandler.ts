@@ -143,6 +143,8 @@ export class MissionHandler {
         'AC_Mission6Hard',
         'BT_Mission1',
         'BT_Mission1Hard',
+        'BT_Mission2',
+        'BT_Mission2Hard',
         'AC_Mission2',
         'AC_Mission2Hard',
         'AC_Mission5',
@@ -4192,7 +4194,7 @@ export class MissionHandler {
     ): boolean {
         if (!MissionHandler.requiresBossAndChestCompletionForDungeon(levelName)) {
             return MissionHandler.hasDefeatedDungeonBoss(client, levelScope) &&
-                !MissionHandler.hasAliveRequiredDungeonBossInCompletionRoom(levelScope, levelName);
+                !MissionHandler.hasAliveRequiredDungeonBossInCompletionRoom(client, levelScope, levelName);
         }
 
         return MissionHandler.hasDefeatedDungeonBoss(client, levelScope) &&
@@ -4300,6 +4302,7 @@ export class MissionHandler {
     }
 
     private static hasAliveRequiredDungeonBossInCompletionRoom(
+        client: Client | null,
         levelScope: string | null | undefined,
         levelName: string | null | undefined
     ): boolean {
@@ -4308,8 +4311,16 @@ export class MissionHandler {
             return false;
         }
 
+        const bossCandidateEntities: any[] = [];
         const levelMap = GlobalState.levelEntities.get(scopeKey);
-        if (!levelMap?.size) {
+        for (const entity of levelMap?.values() ?? []) {
+            bossCandidateEntities.push(entity);
+        }
+        for (const entity of client?.entities?.values?.() ?? []) {
+            bossCandidateEntities.push(entity);
+        }
+
+        if (!bossCandidateEntities.length) {
             return false;
         }
 
@@ -4321,7 +4332,7 @@ export class MissionHandler {
             Boolean(normalizedLevel && MissionHandler.DUNGEONS_WITH_REQUIRED_BOSS_PROXY_COPIES.has(normalizedLevel));
         const progress = MissionHandler.dungeonCompletionObjectiveProgress.get(scopeKey);
         const bossRoomId = MissionHandler.getCompletionBossRoomId(scopeKey);
-        for (const entity of levelMap.values()) {
+        for (const entity of bossCandidateEntities) {
             if (
                 entity &&
                 !entity.isPlayer &&

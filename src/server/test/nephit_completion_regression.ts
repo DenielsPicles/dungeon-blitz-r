@@ -383,6 +383,46 @@ async function testOldMineHardBossMapClientCompletionWaitsForBossDeath(): Promis
     }
 }
 
+async function testDreadSvaggClientCompletionWaitsForLiveBossDeath(): Promise<void> {
+    const client = createBossDungeonClient('DreadSvaggRunner', 83105, 'BT_Mission2Hard');
+    const staleDefeatedBoss = createRequiredBoss('BanditBossHard', 9915, 12, 0);
+    const liveBoss = createRequiredBoss('BanditBossHard', 9915, 12, 5000);
+    const scope = getClientLevelScope(client as never);
+
+    GlobalState.levelEntities.set(scope, new Map([[staleDefeatedBoss.id, staleDefeatedBoss]]));
+    client.entities.set(liveBoss.id, liveBoss);
+
+    await MissionHandler.handleSetLevelComplete(client as never, buildLevelCompletePacket(100));
+    await waitForPendingSettle();
+
+    assert.equal(rankPacketCount(client), 0, 'Dread Svagg must not finish while the live boss copy is still alive');
+    assert.equal(Number(client.character.questTrackerState ?? 0), 0);
+}
+
+async function testEveryDreadBossMapDungeonRequiresBossDefeat(): Promise<void> {
+    const dungeonEnemyElements = require('../data/dungeon_enemy_elements.json') as Record<string, unknown>;
+    const dreadBossDungeons = Object.keys(dungeonEnemyElements)
+        .filter((levelName) => /Hard$/.test(levelName) && LevelConfig.isDungeonLevel(levelName));
+
+    assert.ok(dreadBossDungeons.length > 0, 'expected hard dungeon boss maps to be loaded');
+
+    let checkedBossDungeons = 0;
+    for (const levelName of dreadBossDungeons) {
+        if (!GameData.hasDungeonBossEntities(levelName)) {
+            continue;
+        }
+
+        checkedBossDungeons += 1;
+        assert.equal(
+            (MissionHandler as any).requiresCompletionBossDefeatForDungeon(levelName),
+            true,
+            `${levelName} must require boss defeat before dungeon completion`
+        );
+    }
+
+    assert.ok(checkedBossDungeons > 0, 'expected at least one hard dungeon with boss entities');
+}
+
 async function testHuntedToTheEdgeRequiresBothBosses(): Promise<void> {
     const client = createBossDungeonClient('HuntedEdgeRunner', 83110, 'OMM_Mission5Hard');
     const dragon = createRequiredBoss('DragonWhiteHard', 9910, 12, 0);
@@ -566,6 +606,16 @@ async function main(): Promise<void> {
         GlobalState.levelQuestProgress.clear();
         GlobalState.sessionsByToken.clear();
         await testOldMineHardBossMapClientCompletionWaitsForBossDeath();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.levelQuestProgress.clear();
+        GlobalState.sessionsByToken.clear();
+        await testDreadSvaggClientCompletionWaitsForLiveBossDeath();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.levelQuestProgress.clear();
+        GlobalState.sessionsByToken.clear();
+        await testEveryDreadBossMapDungeonRequiresBossDefeat();
 
         GlobalState.levelEntities.clear();
         GlobalState.levelQuestProgress.clear();
