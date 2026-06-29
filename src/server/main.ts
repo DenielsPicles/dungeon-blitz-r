@@ -13,7 +13,6 @@ import { SocialHandler } from './handlers/SocialHandler';
 import { LevelConfig } from './core/LevelConfig';
 import { CharacterTemplates } from './core/CharacterTemplates';
 import { PetConfig } from './core/PetConfig';
-import { PetHandler } from './handlers/PetHandler';
 import { TalentHandler } from './handlers/TalentHandler';
 import { SigilHandler } from './handlers/SigilHandler';
 import { GameData } from './core/GameData';
@@ -47,13 +46,19 @@ import { StaticServer } from './core/StaticServer';
 type DungeonCompletionPatchTarget = {
     DUNGEONS_REQUIRING_BOSS_DEFEAT?: Set<string>;
     REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL?: Record<string, ReadonlySet<string>>;
+    DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE?: Set<string>;
 };
 
-function applySvarSpiteDungeonCompletionPatch(): void {
+function applyDungeonCompletionPatches(): void {
     const missionHandler = MissionHandler as unknown as DungeonCompletionPatchTarget;
 
     missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('SRN_Mission3');
     missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('SRN_Mission3Hard');
+    missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('GhostBossDungeon');
+    missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('GhostBossDungeonHard');
+
+    missionHandler.DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE?.add('GhostBossDungeon');
+    missionHandler.DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE?.add('GhostBossDungeonHard');
 
     const requiredBossNames = missionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL;
     if (!requiredBossNames) {
@@ -62,9 +67,11 @@ function applySvarSpiteDungeonCompletionPatch(): void {
 
     requiredBossNames.SRN_Mission3 = new Set(['YoungDragonGreen']);
     requiredBossNames.SRN_Mission3Hard = new Set(['YoungDragonGreenHard']);
+    requiredBossNames.GhostBossDungeon = new Set(['NephitLargeEye']);
+    requiredBossNames.GhostBossDungeonHard = new Set(['NephitLargeEyeHard']);
 }
 
-applySvarSpiteDungeonCompletionPatch();
+applyDungeonCompletionPatches();
 
 // Load Config
 const dataDir = path.join(Config.DATA_DIR, 'data');
@@ -85,110 +92,95 @@ discordSocialBridge.initialize();
 const router = new PacketRouter();
 
 // Register Handlers
-router.register(0x11, LoginHandler.handleLoginVersion);       // Version
-router.register(0x13, LoginHandler.handleLoginCreate);        // Create Account
-router.register(0x14, LoginHandler.handleLoginAuthenticate);  // Login
-router.register(0x16, CharacterHandler.handleCharacterSelect); // Select Character
-router.register(0x17, CharacterHandler.handleLoginCharacterCreate); // Create Character
-router.register(0x19, CharacterHandler.handlePaperDollRequest); // Paper Doll Request
-router.register(0x1f, CharacterHandler.handleGameServerLogin); // Game Server Login
-router.register(0x8E, CharacterHandler.handleHomeLookChange); // Home Look Change
-router.register(0xF4, CharacterHandler.handleRequestArmoryGears); // Armory Gear Request
-router.register(0xBA, CharacterHandler.handleApplyDyes); // Apply Dye
+router.register(0x11, LoginHandler.handleLoginVersion);
+router.register(0x13, LoginHandler.handleLoginCreate);
+router.register(0x14, LoginHandler.handleLoginAuthenticate);
+router.register(0x16, CharacterHandler.handleCharacterSelect);
+router.register(0x17, CharacterHandler.handleLoginCharacterCreate);
+router.register(0x19, CharacterHandler.handlePaperDollRequest);
+router.register(0x1f, CharacterHandler.handleGameServerLogin);
+router.register(0x8E, CharacterHandler.handleHomeLookChange);
+router.register(0xF4, CharacterHandler.handleRequestArmoryGears);
+router.register(0xBA, CharacterHandler.handleApplyDyes);
 
-// Missing Packets
-router.register(0x8, EntityHandler.handleEntityFullUpdate); // Entity Full Update
-router.register(0xA2, CommandHandler.handleLinkUpdater); // Link Updater
-router.register(0x10D, CommandHandler.handleActivatePotion); // Active Potion Sync
-router.register(0x10E, CommandHandler.handleQueuePotion); // Queue Potion
-router.register(0x113, CommandHandler.handleUpdateAlertState); // Alert State Seen
-router.register(0xBC, CommandHandler.handleKeyBindingSave); // Key Bindings Save
-router.register(0xBB, CommandHandler.handleHpIncreaseNotice); // Max HP Delta
-router.register(0xFC, CommandHandler.handleSendCombatStats); // Combat Stat Sync
-router.register(0x2A, LootDepthRewardHandler.handleGrantReward); // Grant Reward
-router.register(0x38, RewardHandler.handlePickupLootdrop); // Pickup Lootdrop
-router.register(0x30, EquipmentHandler.handleUpdateEquipment); // Update Equipment
-router.register(0x31, EquipmentHandler.handleUpdateSingleGear); // Update Single Gear
-router.register(0xB0, EquipmentHandler.handleSocketCharm); // Socket / Unsocket Charm
-router.register(0xC6, GearSetHandler.handleOverwriteGearSet); // Gear Manager Save / Overwrite Set
-router.register(0xC7, GearSetHandler.handleCreateGearSet); // Gear Manager Create Set
-router.register(0xC8, GearSetHandler.handleRenameGearSet); // Gear Manager Rename GearSet
-router.register(0x105, LockboxHandler.handleBuyLockboxKeys); // Buy Dragon Keys
-router.register(0x107, LockboxHandler.handleLockboxReward); // Open Lockbox / Treasure Trove
-router.register(0x114, LockboxHandler.handleBuyTreasureTrove); // Buy Treasure Trove
-router.register(0xBD, AbilityHandler.handleActiveAbilitiesUpdate); // Active Ability Loadout
-router.register(0xBE, AbilityHandler.handleStartAbilityResearch); // Start Ability Research
-router.register(0x41, LevelHandler.handleRequestDoorState); // Request Door State
-router.register(0x3F, MissionHandler.handleSetLevelComplete); // Level Complete
-router.register(0x8D, MissionHandler.handleBadgeRequest); // Badge / Achievement
-router.register(0xB7, LevelHandler.handleQuestProgressUpdate); // Quest Progress Update
-router.register(0xA5, LevelHandler.handleRoomEventStart); // Room Event Start
-router.register(0xA6, LevelHandler.handleRoomClose); // Room Close
-router.register(0xA8, LevelHandler.handlePlaySound); // Play Sound
-router.register(0xA9, LevelHandler.handleRoomStateUpdate); // Room State Update
-router.register(0xAA, LevelHandler.handleActionUpdate); // Action Update
-router.register(0xAB, LevelHandler.handleRoomInfoUpdate); // Room Info Update
-router.register(0xAC, LevelHandler.handleRoomBossInfo); // Room Boss Info
-router.register(0xAD, LevelHandler.handleRoomUnlock); // Room Unlock
-router.register(0xAE, LevelHandler.handleSetUntargetable); // Set Untargetable
-router.register(0x95, SocialHandler.handleZonePanelRequest); // Zone Panel Request
-router.register(0x2C, SocialHandler.handlePublicChat); // Public Chat
-router.register(0x46, SocialHandler.handlePrivateMessage); // Private Message
-router.register(0x40, SocialHandler.handleLevelState); // Level State
-router.register(0x76, SocialHandler.handleRoomThought); // Room Thought
-router.register(0x8A, LevelHandler.handleChangeMaxSpeed); // Change Max Speed
-router.register(0x7D, LevelHandler.handleChangeOffsetY); // Change Offset Y
-router.register(0x7E, SocialHandler.handleEmoteBegin); // Emote Begin
-router.register(0x7F, SocialHandler.handleEmoteEnd); // Emote End
-router.register(0x7A, NpcHandler.handleTalkToNpc); // Talk To NPC
-router.register(0xA7, SocialHandler.handleEmote); // Emote
-router.register(0xC5, SocialHandler.handleStartSkit); // Start Skit
-router.register(0x65, SocialHandler.handleGroupInvite); // Group Invite
-router.register(0x59, SocialHandler.handleQueryMessageAnswer); // Query Message Answer
-router.register(0x8B, SocialHandler.handleMapLocationUpdate); // Group Map Position
-router.register(0x67, SocialHandler.handleGroupKick); // Group Kick
-router.register(0x66, SocialHandler.handleGroupLeave); // Group Leave
-router.register(0x68, SocialHandler.handleGroupLeader); // Group Leader
-router.register(0x69, SocialHandler.handleGroupLock); // Group Lock
-router.register(0x6A, SocialHandler.handleJoinPartyRequest); // Join Party
-router.register(0x63, SocialHandler.handleSendGroupChat); // Group Chat
-router.register(0x6B, SocialHandler.handleTeleportToPlayer); // Teleport To Party Member
-router.register(0x90, SocialHandler.handleFriendRequest); // Friend Request / Accept
-router.register(0x91, SocialHandler.handleUnfriend); // Unfriend / Decline
-router.register(0x43, SocialHandler.handleToggleIgnore); // Ignore Toggle
-router.register(0x9E, SocialHandler.handleRequestIgnoreList); // Ignore List Request
-router.register(0xC9, SocialHandler.handleRequestFriendList); // Friend List Request
-router.register(0x4D, GuildHandler.handleCreateGuild); // Create Guild
-router.register(0x4E, GuildHandler.handleDisbandGuild); // Disband Guild
-router.register(0x4F, GuildHandler.handleInviteGuildMember); // Guild Invite
-router.register(0x50, GuildHandler.handleKickGuildMember); // Guild Kick
-router.register(0x51, GuildHandler.handlePromoteGuildMember); // Guild Promote
-router.register(0x52, GuildHandler.handleDemoteGuildMember); // Guild Demote
-router.register(0x53, GuildHandler.handleTransferGuildLeadership); // Guild Leader Transfer
-router.register(0x54, GuildHandler.handleQuitGuild); // Guild Leave
-router.register(0x5F, GuildHandler.handleGuildChat); // Guild Chat
-router.register(0x61, GuildHandler.handleOfficerChat); // Officer Chat
+router.register(0x8, EntityHandler.handleEntityFullUpdate);
+router.register(0xA2, CommandHandler.handleLinkUpdater);
+router.register(0x10D, CommandHandler.handleActivatePotion);
+router.register(0x10E, CommandHandler.handleQueuePotion);
+router.register(0x113, CommandHandler.handleUpdateAlertState);
+router.register(0xBC, CommandHandler.handleKeyBindingSave);
+router.register(0xBB, CommandHandler.handleHpIncreaseNotice);
+router.register(0xFC, CommandHandler.handleSendCombatStats);
+router.register(0x2A, LootDepthRewardHandler.handleGrantReward);
+router.register(0x38, RewardHandler.handlePickupLootdrop);
+router.register(0x30, EquipmentHandler.handleUpdateEquipment);
+router.register(0x31, EquipmentHandler.handleUpdateSingleGear);
+router.register(0xB0, EquipmentHandler.handleSocketCharm);
+router.register(0xC6, GearSetHandler.handleOverwriteGearSet);
+router.register(0xC7, GearSetHandler.handleCreateGearSet);
+router.register(0xC8, GearSetHandler.handleRenameGearSet);
+router.register(0x105, LockboxHandler.handleBuyLockboxKeys);
+router.register(0x107, LockboxHandler.handleLockboxReward);
+router.register(0x114, LockboxHandler.handleBuyTreasureTrove);
+router.register(0xBD, AbilityHandler.handleActiveAbilitiesUpdate);
+router.register(0xBE, AbilityHandler.handleStartAbilityResearch);
+router.register(0x41, LevelHandler.handleRequestDoorState);
+router.register(0x3F, MissionHandler.handleSetLevelComplete);
+router.register(0x8D, MissionHandler.handleBadgeRequest);
+router.register(0xB7, LevelHandler.handleQuestProgressUpdate);
+router.register(0xA5, LevelHandler.handleRoomEventStart);
+router.register(0xA6, LevelHandler.handleRoomClose);
+router.register(0xA8, LevelHandler.handlePlaySound);
+router.register(0xA9, LevelHandler.handleRoomStateUpdate);
+router.register(0xAA, LevelHandler.handleActionUpdate);
+router.register(0xAB, LevelHandler.handleRoomInfoUpdate);
+router.register(0xAC, LevelHandler.handleRoomBossInfo);
+router.register(0xAD, LevelHandler.handleRoomUnlock);
+router.register(0xAE, LevelHandler.handleSetUntargetable);
+router.register(0x95, SocialHandler.handleZonePanelRequest);
+router.register(0x2C, SocialHandler.handlePublicChat);
+router.register(0x46, SocialHandler.handlePrivateMessage);
+router.register(0x40, SocialHandler.handleLevelState);
+router.register(0x76, SocialHandler.handleRoomThought);
+router.register(0x8A, LevelHandler.handleChangeMaxSpeed);
+router.register(0x7D, LevelHandler.handleChangeOffsetY);
+router.register(0x7E, SocialHandler.handleEmoteBegin);
+router.register(0x7F, SocialHandler.handleEmoteEnd);
+router.register(0x7A, NpcHandler.handleTalkToNpc);
+router.register(0xA7, SocialHandler.handleEmote);
+router.register(0xC5, SocialHandler.handleStartSkit);
+router.register(0x65, SocialHandler.handleGroupInvite);
+router.register(0x59, SocialHandler.handleQueryMessageAnswer);
+router.register(0x8B, SocialHandler.handleMapLocationUpdate);
+router.register(0x67, SocialHandler.handleGroupKick);
+router.register(0x66, SocialHandler.handleGroupLeave);
+router.register(0x68, SocialHandler.handleGroupLeader);
+router.register(0x69, SocialHandler.handleGroupLock);
+router.register(0x6A, SocialHandler.handleJoinPartyRequest);
+router.register(0x63, SocialHandler.handleSendGroupChat);
+router.register(0x6B, SocialHandler.handleTeleportToPlayer);
+router.register(0x90, SocialHandler.handleFriendRequest);
+router.register(0x91, SocialHandler.handleUnfriend);
+router.register(0x43, SocialHandler.handleToggleIgnore);
+router.register(0x9E, SocialHandler.handleRequestIgnoreList);
+router.register(0xC9, SocialHandler.handleRequestFriendList);
+router.register(0x4D, GuildHandler.handleCreateGuild);
+router.register(0x4E, GuildHandler.handleDisbandGuild);
+router.register(0x4F, GuildHandler.handleInviteGuildMember);
+router.register(0x50, GuildHandler.handleKickGuildMember);
+router.register(0x51, GuildHandler.handlePromoteGuildMember);
+router.register(0x52, GuildHandler.handleDemoteGuildMember);
+router.register(0x53, GuildHandler.handleTransferGuildLeadership);
+router.register(0x54, GuildHandler.handleQuitGuild);
+router.register(0x5F, GuildHandler.handleGuildChat);
+router.register(0x61, GuildHandler.handleOfficerChat);
 
-router.register(0xF3, SocialHandler.handleRequestVisitPlayerHouse); // Visit House
-router.register(0x2D, LevelHandler.handleOpenDoor); // Open Door
-router.register(0x1D, LevelHandler.handleLevelTransferRequest); // Level Transfer
-router.register(0x07, LevelHandler.handleEntityIncrementalUpdate); // Movement Update
+router.register(0xF3, SocialHandler.handleRequestVisitPlayerHouse);
+router.register(0x2D, LevelHandler.handleOpenDoor);
+router.register(0x1D, LevelHandler.handleLevelTransferRequest);
+router.register(0x07, LevelHandler.handleEntityIncrementalUpdate);
 
-// Pet Packets
-router.register(0xB3, PetHandler.handleEquipPets);
-router.register(0xB2, PetHandler.handleMountEquipPacket);
-router.register(0xE4, PetHandler.handleRequestHatcheryEggs);
-router.register(0xEC, PetHandler.handleTrainPet);
-router.register(0xEF, PetHandler.handlePetTrainingCollect);
-router.register(0xED, PetHandler.handlePetTrainingCancel);
-router.register(0xF0, PetHandler.handlePetSpeedUp);
-router.register(0xE6, PetHandler.handleEggHatch);
-router.register(0xE9, PetHandler.handleEggSpeedUp);
-router.register(0xEA, PetHandler.handleCollectHatchedEgg);
-router.register(0xE8, PetHandler.handleCancelEggHatch);
 router.register(0x110, ForgeHandler.handleUseForgeConsumable);
-
-// Forge
 router.register(0xB1, ForgeHandler.handleStartForge);
 router.register(0xE2, ForgeHandler.handleForgeSpeedUpPacket);
 router.register(0xD0, ForgeHandler.handleCollectForgeCharm);
@@ -196,7 +188,6 @@ router.register(0xE1, ForgeHandler.handleCancelForge);
 router.register(0xD3, ForgeHandler.handleAllocateMagicForgeArtisanSkillPoints);
 router.register(0xCF, ForgeHandler.handleMagicForgeReroll);
 
-// Combat
 router.register(0x9, CombatHandler.handlePowerCast);
 router.register(0x0A, CombatHandler.handlePowerHit);
 router.register(0x0E, CombatHandler.handleProjectileExplode);
@@ -208,16 +199,13 @@ router.register(0x79, CombatHandler.handleBuffTickDot);
 router.register(0x0B, CombatHandler.handleAddBuff);
 router.register(0x0C, CombatHandler.handleRemoveBuff);
 
-// Buildings
 router.register(0xD7, BuildingHandler.handleBuildingUpgrade);
 router.register(0xD9, BuildingHandler.handleBuildingClaim);
 router.register(0xDB, BuildingHandler.handleBuildingCancel);
 router.register(0xDC, BuildingHandler.handleBuildingSpeedUpRequest);
 
-// System
 router.register(0x7C, SystemHandler.handleClientCrashReport);
 
-// Talent Packets
 router.register(0xD2, TalentHandler.handleRespecTalentTree);
 router.register(0xD1, AbilityHandler.handleClaimAbilityResearch);
 router.register(0xC0, TalentHandler.handleAllocateTalentTreePoints);
@@ -229,10 +217,8 @@ router.register(0xDD, AbilityHandler.handleClearAbilityResearch);
 router.register(0xDE, AbilityHandler.handleSpeedupAbilityResearch);
 router.register(0xDF, TalentHandler.handleClearTalentResearch);
 
-// Sigil Packets
 router.register(0x106, SigilHandler.handleRoyalSigilStorePurchase);
 
-// Start Servers
 let policyServer: PolicyServer | null = null;
 const staticServer = new StaticServer(Config.STATIC_PORT, '../client/content/localhost', Config.BIND_HOST);
 const gameServer = new GameServer(Config.PORTS[0], router, Config.BIND_HOST);
