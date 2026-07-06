@@ -28,6 +28,7 @@ import { LevelConfig } from '../core/LevelConfig';
 import { isRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import { RewardHandler } from './RewardHandler';
+import { getEquippedCharmBonuses } from '../utils/CharmBonuses';
 
 type CombatRelayOptions = {
     includeAnchor?: boolean;
@@ -1839,17 +1840,22 @@ export class CombatHandler {
             (CombatHandler.isEntityDead(entity) || healthState!.currentHp <= 0);
         const verifiedDefeat = deathRegenArmed &&
             CombatHandler.isHostileDefeatVerified(levelScope, entity);
+        const finalizedDeath = CombatHandler.isTerminalHostileEntity(entity) ||
+            Boolean(entity?.lootDropped) ||
+            Boolean(entity?.deathRewardGrantedAt);
         if (
             !healthState ||
             healthState.currentHp >= healthState.maxHp ||
-            (zeroHpOrDead && (!deadDeathRegenPlayer || verifiedDefeat))
+            zeroHpOrDead ||
+            verifiedDefeat ||
+            finalizedDeath
         ) {
             CombatHandler.logBossRegen('boss-regen-skip', levelScope, entity, {
                 reason: !healthState
                     ? 'no-health'
                     : healthState.currentHp >= healthState.maxHp
                         ? 'full'
-                        : verifiedDefeat
+                        : verifiedDefeat || finalizedDeath
                             ? 'verified-dead'
                             : 'dead',
                 currentHp: healthState?.currentHp ?? 0,
@@ -1892,17 +1898,6 @@ export class CombatHandler {
                 maxHp: healthState.maxHp,
                 aggroTargetEntityId: Math.round(Number(entity?.aggroTargetEntityId ?? 0)),
                 aggroTargetToken: Math.round(Number(entity?.aggroTargetToken ?? 0))
-            }, CombatHandler.BOSS_REGEN_LOG_THROTTLE_MS, nowMs);
-            return;
-        }
-
-        if (!deathRegenArmed) {
-            CombatHandler.logBossRegen('boss-regen-skip', levelScope, entity, {
-                reason: 'death-not-armed',
-                currentHp: healthState.currentHp,
-                maxHp: healthState.maxHp,
-                healthDelta: CombatHandler.getNpcHealthDelta(entity),
-                roomId: Math.round(Number(entity?.roomId ?? -1))
             }, CombatHandler.BOSS_REGEN_LOG_THROTTLE_MS, nowMs);
             return;
         }
@@ -2567,6 +2562,13 @@ export class CombatHandler {
             ) {
                 continue;
             }
+            if (
+                CombatHandler.isTerminalHostileEntity(entity) ||
+                Boolean(entity?.lootDropped) ||
+                Boolean(entity?.deathRewardGrantedAt)
+            ) {
+                continue;
+            }
 
             const alreadyArmedForThisDeath = String(entity.deathRegenArmedForPlayerKey ?? '') === deathRegenArmKey;
             CombatHandler.clearHostileAggroTargetForPlayer(entity, client);
@@ -2662,6 +2664,14 @@ export class CombatHandler {
                 continue;
             }
             if (Boolean(entity?.isPlayer) || Number(entity?.team ?? 0) !== 2) {
+                continue;
+            }
+            if (
+                CombatHandler.isTerminalHostileEntity(entity) ||
+                Boolean(entity?.lootDropped) ||
+                Boolean(entity?.deathRewardGrantedAt) ||
+                CombatHandler.isHostileDefeatVerified(levelScope, entity)
+            ) {
                 continue;
             }
 
@@ -4975,6 +4985,17 @@ export class CombatHandler {
         }
     }
 
+    private static normalizePlayerCriticalHitDamage(sourceSession: Client | null, info: PowerHitRelayInfo): number {
+        const baseDamage = Math.max(0, Math.round(Number(info.damage ?? 0) || 0));
+        if (!info.isCrit || baseDamage <= 0 || !sourceSession?.character) {
+            return baseDamage;
+        }
+
+        const charmBonuses = getEquippedCharmBonuses(sourceSession.character);
+        const criticalPower = Math.max(0, Number(charmBonuses.powerBonus ?? 0) || 0);
+        return CombatHandler.clampRelayPowerHitDamage(Math.round(baseDamage * (2 + criticalPower)));
+    }
+
     private static updatePlayerTargetAfterHit(targetSession: Client, damage: number, preventDeath: boolean = false): PlayerHitResolution {
         if (damage <= 0 || !targetSession.character || targetSession.clientEntID <= 0) {
             return {
@@ -5469,7 +5490,9 @@ export class CombatHandler {
         }
         const info = CombatHandler.resolveClientEntityAliases(client, parsedInfo);
 
-        const { targetId, sourceId, damage } = info;
+        const { targetId, sourceId } = info;
+        const rawDamage = Math.max(0, Math.round(Number(info.damage ?? 0) || 0));
+        let damage = rawDamage;
         const currentLevel = client.currentLevel;
         const levelScope = getClientLevelScope(client);
         CombatHandler.logAliasInbound(0x0A, client, parsedInfo.targetId, targetId);
@@ -5545,6 +5568,8 @@ export class CombatHandler {
         ) {
             return;
         }
+
+        damage = CombatHandler.normalizePlayerCriticalHitDamage(sourceSession, info);
 
         if (client.currentLevel === 'CraftTownTutorial' && client.keepTutorialState) {
             LevelHandler.checkCraftTownTutorialBossHealth(client, targetId, damage);
@@ -5688,7 +5713,7 @@ export class CombatHandler {
         }
 
         const displayRelayDamage = CombatHandler.clampRelayPowerHitDamage(relayDamage);
-        const relayPayload = displayRelayDamage === damage && info === parsedInfo
+        const relayPayload = displayRelayDamage === rawDamage && info === parsedInfo
             ? data
             : CombatHandler.buildPowerHitPayload(info, displayRelayDamage);
         if (partySharedHostileHealthRelay?.entity) {
