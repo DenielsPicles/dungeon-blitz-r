@@ -1,5 +1,7 @@
 import { GlobalState, SharedDungeonProgressState } from './GlobalState';
+import { DungeonSpawnLoader, DungeonSpawnConfig } from '../data/DungeonSpawnLoader';
 import { getActiveDungeonRunStats } from './DungeonRunStats';
+import { EntityTeam } from './Entity';
 import { LevelConfig } from './LevelConfig';
 import { getClientLevelScope, getScopeLevelName } from './LevelScope';
 import { getClientCharacterKey, getPartyLeaderCharacterKeyForClient } from './PartySync';
@@ -9,12 +11,28 @@ import {
     isDungeonStatsDefeated,
     isDungeonStatsHostile
 } from './WolfsEndDungeonStatsPolicy';
+import {
+    hasEastWingCombatDeathEvidence,
+    isEastWingRequiredEnemy,
+    logEastWingProgressBlocked
+} from './EastWingEnemyDebug';
 
 const GOBLIN_RIVER_INITIAL_PROGRESS = 11;
 const SHARED_DUNGEON_PROGRESS_EXCLUDED_LEVELS = new Set<string>([
     'TutorialBoat',
     'TutorialDungeon',
     'TutorialDungeonHard'
+]);
+const SERVER_AUTHORITY_HOSTILE_PROGRESS_LEVELS = new Set<string>([
+    'AC_Mission1',
+    'Castle',
+    'CastleHard',
+    'JC_Mini2',
+    'JC_Mini2Hard'
+]);
+const EAST_WING_LEVELS = new Set<string>([
+    'JC_Mini2',
+    'JC_Mini2Hard'
 ]);
 
 function normalizeAuthorityToken(value: unknown): number {
@@ -31,11 +49,82 @@ function clampProgress(value: unknown): number {
     return Math.max(0, Math.min(100, Math.round(progress)));
 }
 
+function getRequiredForClearProgressConfig(levelName: string | null | undefined): DungeonSpawnConfig | null {
+    return DungeonSpawnLoader.getSpawnConfigForLevel(LevelConfig.normalizeLevelName(levelName));
+}
+
+function usesRequiredForClearProgress(levelScope: string | null | undefined, levelName: string | null | undefined): boolean {
+    if (getRequiredForClearProgressConfig(levelName)) {
+        return true;
+    }
+
+    const levelMap = GlobalState.levelEntities.get(String(levelScope ?? '').trim());
+    for (const entity of levelMap?.values() ?? []) {
+        if (entity?.requiredForClear === true) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function logRequiredForClearProgress(
+    levelScope: string,
+    levelName: string | null | undefined,
+    totals: { total: number; defeated: number },
+    progress: number
+): void {
+    const config = getRequiredForClearProgressConfig(levelName);
+    if (!config) {
+        return;
+    }
+
+    console.log(
+        `[DungeonProgress] level=${config.levelId || config.levelName} levelName=${config.levelName} dungeon="${config.dungeonName}" scope=${levelScope} totalRequired=${totals.total} deadRequired=${totals.defeated} percent=${progress}`
+    );
+    if (EAST_WING_LEVELS.has(config.levelName)) {
+        let rawDeadEntities = 0;
+        let ignoredRawDeadWithoutCombat = 0;
+        for (const entity of GlobalState.levelEntities.get(levelScope)?.values() ?? []) {
+            if (!isEastWingRequiredEnemy(levelScope, entity)) {
+                continue;
+            }
+            if (isEntityDefeated(entity)) {
+                rawDeadEntities++;
+                if (!hasEastWingCombatDeathEvidence(entity)) {
+                    ignoredRawDeadWithoutCombat++;
+                }
+            }
+        }
+        console.log(
+            `[EastWingProgress] totalRequired=${totals.total} deadRequired=${totals.defeated} acceptedCombatKills=${totals.defeated} rawDeadEntities=${rawDeadEntities} ignoredRawDeadWithoutCombat=${ignoredRawDeadWithoutCombat} percent=${progress}`
+        );
+    }
+}
+
+function hasDefeatedEastWingBoss(levelScope: string): boolean {
+    const levelMap = GlobalState.levelEntities.get(levelScope);
+    for (const entity of levelMap?.values() ?? []) {
+        if (
+            entity?.requiredForClear === true &&
+            (entity?.boss === true || entity?.roomBoss === true || entity?.isRoomBoss === true) &&
+            isCombatValidDefeatedEntity(levelScope, Math.max(0, Math.round(Number(entity?.id ?? 0))), entity, 'SharedDungeonProgress.hasDefeatedEastWingBoss')
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 export function usesSharedDungeonProgress(levelName: string | null | undefined): boolean {
     const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
     return Boolean(normalizedLevel) &&
         !SHARED_DUNGEON_PROGRESS_EXCLUDED_LEVELS.has(normalizedLevel) &&
-        isWolfsEndDungeonLevel(normalizedLevel);
+        (
+            isWolfsEndDungeonLevel(normalizedLevel) ||
+            Boolean(getRequiredForClearProgressConfig(normalizedLevel))
+        );
 }
 
 export function getSharedDungeonInitialProgress(levelName: string | null | undefined): number {
@@ -133,12 +222,62 @@ function refreshSharedDungeonLiveStats(
     }
 }
 
-function isSharedDungeonTrackedHostile(entity: any): boolean {
-    return Boolean(entity?.clientSpawned) && isDungeonStatsHostile(entity);
+function usesServerAuthorityHostileProgress(levelNameOrScope: string | null | undefined): boolean {
+    const levelName = getScopeLevelName(String(levelNameOrScope ?? ''));
+    const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+    return typeof normalizedLevel === 'string' &&
+        normalizedLevel.length > 0 &&
+        SERVER_AUTHORITY_HOSTILE_PROGRESS_LEVELS.has(normalizedLevel);
+}
+
+function isSharedDungeonTrackedHostile(levelNameOrScope: string | null | undefined, entity: any): boolean {
+    if (!isDungeonStatsHostile(entity)) {
+        return false;
+    }
+
+    if (entity?.requiredForClear === true) {
+        return true;
+    }
+
+    if (usesServerAuthorityHostileProgress(levelNameOrScope)) {
+        return (
+            Boolean(entity?.serverAuthorityHostile) ||
+            (
+                !Boolean(entity?.clientSpawned) &&
+                !Boolean(entity?.isPlayer) &&
+                Number(entity?.team ?? EntityTeam.UNKNOWN) === EntityTeam.ENEMY
+            )
+        );
+    }
+
+    return Boolean(entity?.clientSpawned) || Boolean(entity?.serverAuthorityHostile);
 }
 
 function isEntityDefeated(entity: any): boolean {
     return isDungeonStatsDefeated(entity);
+}
+
+function isCombatValidDefeatedEntity(levelScope: string | null | undefined, entityId: number, entity: any, sourcePath: string): boolean {
+    if (!isEntityDefeated(entity)) {
+        return false;
+    }
+
+    if (!isEastWingRequiredEnemy(levelScope, entity)) {
+        return true;
+    }
+
+    if (hasEastWingCombatDeathEvidence(entity)) {
+        return true;
+    }
+
+    logEastWingProgressBlocked('non_combat_death_attempt', sourcePath, String(levelScope ?? ''), entity, {
+        entityId,
+        hpBefore: Math.round(Number(entity?.combatDeathHpBefore ?? entity?.hp ?? 0)),
+        hpAfter: Math.round(Number(entity?.hp ?? 0)),
+        deathCause: entity?.deathCause ?? entity?.combatDeathCause ?? 'unknown',
+        eventId: entity?.combatDeathEventId ?? ''
+    });
+    return false;
 }
 
 export function resolveSharedDungeonProgressAuthorityToken(levelScope: string | null | undefined): number {
@@ -215,7 +354,7 @@ export function hasSharedDungeonProgressHostiles(levelScope: string | null | und
 }
 
 export function noteSharedDungeonHostileState(levelScope: string | null | undefined, entityId: number, entity: any): void {
-    if (!entityId || !isSharedDungeonTrackedHostile(entity)) {
+    if (!entityId || !isSharedDungeonTrackedHostile(levelScope, entity)) {
         return;
     }
 
@@ -225,7 +364,7 @@ export function noteSharedDungeonHostileState(levelScope: string | null | undefi
     }
 
     state.trackedHostileIds?.add(entityId);
-    if (isEntityDefeated(entity)) {
+    if (isCombatValidDefeatedEntity(levelScope, entityId, entity, 'SharedDungeonProgress.noteSharedDungeonHostileState')) {
         state.defeatedHostileIds?.add(entityId);
     } else {
         state.defeatedHostileIds?.delete(entityId);
@@ -233,7 +372,7 @@ export function noteSharedDungeonHostileState(levelScope: string | null | undefi
 }
 
 export function noteSharedDungeonHostileDestroyed(levelScope: string | null | undefined, entityId: number, entity: any): void {
-    if (!entityId || !isSharedDungeonTrackedHostile(entity)) {
+    if (!entityId || !isSharedDungeonTrackedHostile(levelScope, entity)) {
         return;
     }
 
@@ -243,35 +382,44 @@ export function noteSharedDungeonHostileDestroyed(levelScope: string | null | un
     }
 
     state.trackedHostileIds?.add(entityId);
-    if (isEntityDefeated(entity)) {
+    if (isCombatValidDefeatedEntity(levelScope, entityId, entity, 'SharedDungeonProgress.noteSharedDungeonHostileDestroyed')) {
         state.defeatedHostileIds?.add(entityId);
     }
 }
 
 export function getSharedDungeonProgressTotals(
     levelScope: string | null | undefined
-): { total: number; defeated: number } {
+): { total: number; defeated: number; ignoredClientOnly: number } {
     const scopeKey = String(levelScope ?? '').trim();
     if (!scopeKey) {
-        return { total: 0, defeated: 0 };
+        return { total: 0, defeated: 0, ignoredClientOnly: 0 };
     }
 
     const state = getOrCreateSharedDungeonProgressState(scopeKey);
     if (!state) {
-        return { total: 0, defeated: 0 };
+        return { total: 0, defeated: 0, ignoredClientOnly: 0 };
     }
 
     const tracked = state.trackedHostileIds ?? new Set<number>();
     const defeated = state.defeatedHostileIds ?? new Set<number>();
     const levelMap = GlobalState.levelEntities.get(scopeKey);
+    let ignoredClientOnly = 0;
 
     for (const [entityId, entity] of levelMap?.entries() ?? []) {
-        if (!isSharedDungeonTrackedHostile(entity)) {
+        if (
+            usesServerAuthorityHostileProgress(scopeKey) &&
+            Boolean(entity?.clientSpawned) &&
+            !Boolean(entity?.isPlayer) &&
+            Number(entity?.team ?? EntityTeam.UNKNOWN) === EntityTeam.ENEMY
+        ) {
+            ignoredClientOnly++;
+        }
+        if (!isSharedDungeonTrackedHostile(scopeKey, entity)) {
             continue;
         }
 
         tracked.add(entityId);
-        if (isEntityDefeated(entity)) {
+        if (isCombatValidDefeatedEntity(scopeKey, entityId, entity, 'SharedDungeonProgress.getSharedDungeonProgressTotals')) {
             defeated.add(entityId);
         } else {
             defeated.delete(entityId);
@@ -287,7 +435,8 @@ export function getSharedDungeonProgressTotals(
 
     return {
         total: tracked.size,
-        defeated: defeatedCount
+        defeated: defeatedCount,
+        ignoredClientOnly
     };
 }
 
@@ -300,18 +449,59 @@ export function recomputeSharedDungeonProgress(levelScope: string | null | undef
 
     const totals = getSharedDungeonProgressTotals(levelScope);
     const levelName = getScopeLevelName(levelScope);
-    if (usesSharedDungeonProgress(levelName)) {
-        const initialProgress = getSharedDungeonInitialProgress(levelName);
-        state.progress = totals.total > 0
-            ? clampProgress(initialProgress + ((totals.defeated / totals.total) * (100 - initialProgress)))
-            : initialProgress;
+    const previousProgress = clampProgress(state.progress);
+    const preserveEastWingProgress =
+        EAST_WING_LEVELS.has(levelName) &&
+        previousProgress > 0 &&
+        (
+            totals.total <= 0 ||
+            Boolean(state.bossDead) ||
+            Boolean(state.bossDeathCommitted) ||
+            Boolean(state.bossTombstoned) ||
+            Boolean(state.pendingCompletion) ||
+            Boolean(state.completionFinalized)
+        );
+    if (preserveEastWingProgress) {
+        state.progress = previousProgress;
         refreshSharedDungeonLiveStats(state, scopeKey);
         return state;
     }
 
-    state.progress = totals.total > 0
+    if (usesRequiredForClearProgress(scopeKey, levelName)) {
+        const computedProgress = totals.total > 0
+            ? clampProgress(Math.floor((totals.defeated / totals.total) * 100))
+            : 0;
+        state.progress = EAST_WING_LEVELS.has(levelName) && (Boolean(state.bossDeathCommitted) || hasDefeatedEastWingBoss(scopeKey))
+            ? Math.max(25, computedProgress)
+            : computedProgress;
+        logRequiredForClearProgress(scopeKey, levelName, totals, state.progress);
+        refreshSharedDungeonLiveStats(state, scopeKey);
+        return state;
+    }
+
+    if (usesSharedDungeonProgress(levelName)) {
+        const initialProgress = getSharedDungeonInitialProgress(levelName);
+        const computedProgress = totals.total > 0
+            ? clampProgress(initialProgress + ((totals.defeated / totals.total) * (100 - initialProgress)))
+            : initialProgress;
+        state.progress = EAST_WING_LEVELS.has(levelName) && Boolean(state.bossDeathCommitted)
+            ? Math.max(25, computedProgress)
+            : computedProgress;
+        if (usesServerAuthorityHostileProgress(levelScope)) {
+            console.log(
+                `[MultiplayerSync][progress_server_registry] total=${totals.total} dead=${totals.defeated} ignoredClientOnly=${totals.ignoredClientOnly ?? 0} percent=${state.progress}`
+            );
+        }
+        refreshSharedDungeonLiveStats(state, scopeKey);
+        return state;
+    }
+
+    const computedProgress = totals.total > 0
         ? clampProgress((totals.defeated / totals.total) * 100)
         : 0;
+    state.progress = EAST_WING_LEVELS.has(levelName) && Boolean(state.bossDeathCommitted)
+        ? Math.max(25, computedProgress)
+        : computedProgress;
     refreshSharedDungeonLiveStats(state, scopeKey);
     return state;
 }
