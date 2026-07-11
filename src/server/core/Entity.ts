@@ -111,6 +111,10 @@ export class Entity {
             renderDepthOffset: Number(props.renderDepthOffset ?? props.render_depth_offset ?? 0),
             buffs: props.buffs || [],
             roomId: Number(props.roomId ?? props.room_id ?? -1),
+            // The wire format carries player health as a delta from the
+            // client-derived max HP. Preserve the authoritative server value
+            // so remote players never materialize with an empty 0/0 bar.
+            healthDelta: Number(props.healthDelta ?? props.health_delta ?? 0),
         } as any;
 
         // Player specific fields

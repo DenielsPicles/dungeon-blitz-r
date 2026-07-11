@@ -444,8 +444,16 @@ export function getSharedDungeonProgressTotals(
         }
     }
 
+    const levelName = getScopeLevelName(scopeKey);
+    const eastWingRequiredCount = EAST_WING_LEVELS.has(levelName)
+        ? getRequiredForClearProgressConfig(levelName)?.enemies.filter((enemy) => enemy.requiredForClear).length ?? 0
+        : 0;
+
     return {
-        total: tracked.size,
+        // East Wing regulars remain client-authored. Keep their extracted
+        // required-for-clear roster in the denominator while Tanja is the
+        // only server-owned combat entity.
+        total: Math.max(tracked.size, eastWingRequiredCount),
         defeated: defeatedCount,
         ignoredClientOnly
     };

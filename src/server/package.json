@@ -1,10 +1,10 @@
 {
   "name": "server",
-  "version": "1.6.24",
+  "version": "1.6.25",
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon --ext ts,js --exec \"node tools/runDevServer.js\"",
+    "dev": "nodemon --watch main.ts --watch auth --watch core --watch database --watch handlers --watch integrations --watch network --watch utils --watch tools/runDevServer.js --ext ts,js --ignore dist --ignore test --ignore data/saves --exec \"node tools/runDevServer.js\"",
     "multiplayer": "node tools/startMultiplayerServer.js",
     "dev:discord-bridge": "ts-node tools/discordLocalBridge.ts discord-bridge.dev.config.json",
     "install:discord-social-sdk": "node tools/installDiscordSocialSdk.js",

@@ -8,7 +8,7 @@ import { DeadHostileTombstone, GlobalState } from '../core/GlobalState';
 import { Entity, EntityProps, EntityState, EntityTeam } from '../core/Entity';
 import { LevelConfig } from '../core/LevelConfig';
 import { GameData } from '../core/GameData';
-import { MovementAuthority } from '../core/MovementAuthority';
+import { Config } from '../core/config';
 import { PetHandler } from './PetHandler';
 import { BuildingHandler } from './BuildingHandler';
 import { MissionHandler } from './MissionHandler';
@@ -71,9 +71,7 @@ export class EntityHandler {
         'AC_Mission1'
     ]);
     private static readonly STRICT_SERVER_SPAWN_HOSTILE_LEVELS = new Set<string>([
-        'AC_Mission1',
-        'JC_Mini2',
-        'JC_Mini2Hard'
+        'AC_Mission1'
     ]);
     private static readonly CANONICAL_VISIBLE_PROXY_MATCH_MAX_DISTANCE_SQ = 400 * 400;
     static readonly SERVER_AUTHORITY_ENTITY_LEVEL = 50;
@@ -559,7 +557,7 @@ export class EntityHandler {
     }
 
     private static seedServerAuthorityHostiles(client: Client, levelName: string, levelMap: Map<number, any>): void {
-        if (!EntityHandler.usesServerAuthorityHostiles(levelName)) {
+        if (Config.DISABLE_ALL_ENEMIES || !EntityHandler.usesServerAuthorityHostiles(levelName)) {
             return;
         }
 
@@ -2160,6 +2158,51 @@ export class EntityHandler {
         return EntityHandler.attachServerAuthorityClientHostileProxy(client, levelName, levelMap, entity, rawEntityId);
     }
 
+    private static isEnemyEntity(entity: any): boolean {
+        return Boolean(entity) &&
+            !Boolean(entity?.isPlayer) &&
+            Number(entity?.team ?? 0) === EntityTeam.ENEMY;
+    }
+
+    private static purgeEnemiesFromLevelMapForTesting(levelMap: Map<number, any> | null | undefined): number {
+        if (!Config.DISABLE_ALL_ENEMIES || !levelMap) {
+            return 0;
+        }
+
+        let removed = 0;
+        for (const [entityId, entity] of Array.from(levelMap.entries())) {
+            if (!EntityHandler.isEnemyEntity(entity)) {
+                continue;
+            }
+            levelMap.delete(entityId);
+            removed++;
+        }
+        return removed;
+    }
+
+    static suppressGlobalEnemyTestSpawn(
+        client: Client,
+        entity: any,
+        rawEntityId: number
+    ): boolean {
+        if (
+            Config.DISABLE_ALL_ENEMIES &&
+            EntityHandler.isEnemyEntity(entity)
+        ) {
+            EntityHandler.getLevelMapForClient(client)?.delete(
+                Math.max(0, Math.round(Number(entity?.id ?? rawEntityId) || 0))
+            );
+            EntityHandler.destroyClientLocalEntity(
+                client,
+                rawEntityId,
+                'global_all_enemy_test_suppression',
+                entity
+            );
+            return true;
+        }
+        return false;
+    }
+
     static destroyClientLocalEntity(
         client: Client,
         rawEntityId: number,
@@ -3730,6 +3773,10 @@ export class EntityHandler {
             return true;
         }
 
+        if (Config.DISABLE_ALL_ENEMIES && EntityHandler.isEnemyEntity(entity)) {
+            return false;
+        }
+
         if (EntityHandler.isPartySharedClientSpawnHostile(client.currentLevel, entity)) {
             return EntityHandler.canClientUsePartySharedClientSpawnEntity(client, entity);
         }
@@ -4116,7 +4163,9 @@ export class EntityHandler {
         const current = client.entities.get(entityId) ?? EntityHandler.getLevelMapForClient(client)?.get(entityId) ?? {};
         const playerEntity = Entity.fromCharacter(entityId, client.character, {
             ...current,
-            roomId: client.currentRoomId
+            roomId: client.currentRoomId,
+            healthDelta: Math.round(Number(client.authoritativeCurrentHp ?? 0)) -
+                Math.max(1, Math.round(Number(client.authoritativeMaxHp ?? 100)))
         });
         const persistedEntity = {
             ...current,
@@ -4244,6 +4293,10 @@ export class EntityHandler {
         } else {
              // Fallback for NpcDef or other objects
              props = Entity.fromNpc(entity);
+        }
+
+        if (EntityHandler.suppressGlobalEnemyTestSpawn(client, props, Number(props.id ?? 0))) {
+            return;
         }
         
         const serializedProps = {
@@ -4445,6 +4498,10 @@ export class EntityHandler {
 
         EntityHandler.applyRuntimeDungeonEntityLevel(client, levelName, props);
 
+        if (EntityHandler.suppressGlobalEnemyTestSpawn(client, props, rawEntityId)) {
+            return;
+        }
+
         if (!isPlayer) {
             client.clientSpawnConfirmed = true;
             clearClientSpawnFallbackTimer(client);
@@ -4479,9 +4536,6 @@ export class EntityHandler {
         }
 
         client.entities.set(entityId, props);
-        if (ownsThisPlayerPacket) {
-            MovementAuthority.reset(client, 'entity_full_update', props.x, props.y);
-        }
         noteDungeonRunEntitySeen(client, entityId, props);
         EntityHandler.rememberEntityKnown(client, levelName, props);
 
@@ -4530,6 +4584,9 @@ export class EntityHandler {
                 console.log(`[EntityHandler] Initializing ${npcs.length} NPCs for ${levelName}`);
 
                 for (const npc of npcs) {
+                    if (Config.DISABLE_ALL_ENEMIES && EntityHandler.isEnemyEntity(npc)) {
+                        continue;
+                    }
                     const entityProps = EntityHandler.usesServerAuthorityHostiles(levelName)
                         ? EntityHandler.createServerAuthorityEntityFromNpc(client, levelName, npc)
                         : {
@@ -4547,7 +4604,12 @@ export class EntityHandler {
             }
         }
 
-        if (EntityHandler.usesServerAuthorityHostiles(levelName)) {
+        const removedEnemyCount = EntityHandler.purgeEnemiesFromLevelMapForTesting(levelMap);
+        if (removedEnemyCount > 0) {
+            console.log(`[EntityHandler] Removed ${removedEnemyCount} enemies from ${levelName} for global empty-world testing.`);
+        }
+
+        if (EntityHandler.usesServerAuthorityHostiles(levelName) && !Config.DISABLE_ALL_ENEMIES) {
             EntityHandler.resetServerAuthorityScopeForFreshRun(client, levelName, levelMap);
             EntityHandler.seedServerAuthorityHostiles(client, levelName, levelMap);
 
@@ -4770,12 +4832,11 @@ export class EntityHandler {
                 continue;
             }
 
-            const otherProps = other.entities.get(other.clientEntID);
-            if (!otherProps) {
+            const playerSnapshot = EntityHandler.buildPlayerSnapshot(other);
+            if (!playerSnapshot) {
                 continue;
             }
-
-            EntityHandler.sendEntity(joiner, Entity.fromCharacter(other.clientEntID, other.character, otherProps));
+            EntityHandler.sendEntity(joiner, playerSnapshot);
             EntityHandler.sendOtherPlayerMountToJoiner(joiner, other);
         }
 

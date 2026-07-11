@@ -460,7 +460,7 @@ function buildRegistry() {
     }
 
     const enemies = [];
-    let serverHostileCount = 0;
+    let hostileExportCount = 0;
     let exportOnlyCount = 0;
     for (const room of roomScripts) {
         const roomSprite = sprites.get(room.symbolId);
@@ -488,11 +488,14 @@ function buildRegistry() {
             const entType = entTypes.get(field.type) ?? {};
             const rank = String(entType.EntRank ?? '');
             const hostile = isHostileEntType(field.type, entTypes);
-            const serverSpawn = hostile;
-            const canonicalId = serverSpawn
-                ? target.canonicalIdBase + (++serverHostileCount)
-                : target.canonicalIdBase + 90000 + (++exportOnlyCount);
             const boss = rank === 'Boss' || field.sourceVar === 'am_Boss';
+            // The client owns the East Wing's regular encounter cues.  Seed
+            // only Tanja server-side so her party-shared boss state remains
+            // authoritative without replacing the rest of the dungeon roster.
+            const serverSpawn = hostile && boss;
+            const canonicalId = hostile
+                ? target.canonicalIdBase + (++hostileExportCount)
+                : target.canonicalIdBase + 90000 + (++exportOnlyCount);
             const enemy = {
                 id: canonicalId,
                 canonicalId,
@@ -508,7 +511,7 @@ function buildRegistry() {
                 level: null,
                 hostile,
                 serverSpawn,
-                requiredForClear: hostile && serverSpawn,
+                requiredForClear: hostile,
                 boss: hostile && boss,
                 miniboss: hostile && rank === 'MiniBoss',
                 follower: false,
@@ -578,19 +581,19 @@ function buildRegistry() {
 }
 
 function validateRegistry(registry) {
-    const requiredScriptHostiles = registry.enemies.filter((enemy) => enemy.hostile && enemy.serverSpawn !== false);
+    const requiredScriptHostiles = registry.enemies.filter((enemy) => enemy.hostile);
     const exportedRequired = registry.enemies.filter((enemy) => enemy.requiredForClear);
     const serverSpawnedHostiles = registry.enemies.filter((enemy) => enemy.hostile && enemy.serverSpawn !== false);
-    if (serverSpawnedHostiles.length !== requiredScriptHostiles.length) {
-        throw new Error(`Exported hostile count ${requiredScriptHostiles.length} does not match server-spawned hostile count ${serverSpawnedHostiles.length}`);
+    if (serverSpawnedHostiles.length !== 1 || !serverSpawnedHostiles[0].boss) {
+        throw new Error('The East Wing must export exactly one server-spawned hostile: its boss.');
     }
 
     if (exportedRequired.length !== requiredScriptHostiles.length) {
         throw new Error(`Exported requiredForClear count ${exportedRequired.length} does not match script hostile count ${requiredScriptHostiles.length}`);
     }
 
-    if (exportedRequired.some((enemy) => enemy.hostile === false || enemy.serverSpawn === false)) {
-        throw new Error('Non-hostile or non-server-spawn entries must not be requiredForClear');
+    if (exportedRequired.some((enemy) => enemy.hostile === false)) {
+        throw new Error('Non-hostile entries must not be requiredForClear');
     }
 
     const bossCount = registry.enemies.filter((enemy) => enemy.boss || enemy.miniboss).length;

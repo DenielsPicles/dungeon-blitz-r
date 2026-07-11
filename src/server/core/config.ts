@@ -220,6 +220,8 @@ export const Config = {
     POLICY_PORT: parseNumberEnv('POLICY_PORT', DEFAULT_POLICY_PORT),
     ENABLE_POLICY_SERVER: parseBooleanEnv('ENABLE_POLICY_SERVER', MULTIPLAYER_MODE),
     REWARD_ROLL_DEBUG,
+    // Optional global empty-world test mode. Keep disabled during normal gameplay.
+    DISABLE_ALL_ENEMIES: parseBooleanEnv('DISABLE_ALL_ENEMIES', false),
     MONGODB_URI,
     MONGODB_DB_NAME,
     MONGODB_WALLET_COLLECTION: parseStringEnv('MONGODB_WALLET_COLLECTION', 'wallets'),

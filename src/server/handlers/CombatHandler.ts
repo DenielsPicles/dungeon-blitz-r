@@ -1758,13 +1758,16 @@ export class CombatHandler {
     }
 
     private static getPartySharedHostileAiAuthorityToken(levelScope: string, entity: any): number {
+        const authorityControlledHostile =
+            CombatHandler.shouldMirrorClientSpawnEntityToParty(getScopeLevelName(levelScope), entity) ||
+            EntityHandler.isServerAuthorityHostileEntity(levelScope, entity);
         if (
             !levelScope ||
             !entity ||
             typeof entity !== 'object' ||
             Boolean(entity.isPlayer) ||
             Number(entity.team ?? 0) !== EntityTeam.ENEMY ||
-            !CombatHandler.shouldMirrorClientSpawnEntityToParty(getScopeLevelName(levelScope), entity)
+            !authorityControlledHostile
         ) {
             return 0;
         }

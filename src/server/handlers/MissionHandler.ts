@@ -2394,8 +2394,10 @@ export class MissionHandler {
         }
 
         MissionHandler.ensureEastWingPostDeathGate(source, levelScope, triggerEntity, 'boss-death');
-        const roomId = MissionHandler.getEastWingPostDeathRoomId(levelScope);
-        for (const other of MissionHandler.getEastWingCompletionEligibleClients(source, levelScope, roomId)) {
+        // Completion is scope-wide. Only players actually watching the boss
+        // room cinematic participate in its close barrier, but every eligible
+        // party member in this dungeon receives the final result.
+        for (const other of MissionHandler.getEastWingCompletionEligibleClients(source, levelScope, 0)) {
             if (MissionHandler.hasFinalizedDungeonCompletion(other, levelScope)) {
                 continue;
             }

@@ -27,7 +27,6 @@ import { DialogueTranslationLoader } from '../data/DialogueTranslationLoader';
 import { MissionID } from '../data/runtime';
 import { Entity, EntityState, EntityTeam } from '../core/Entity';
 import { Character } from '../database/Database';
-import { MovementAuthority } from '../core/MovementAuthority';
 import { EntityHandler } from './EntityHandler';
 import { MissionHandler } from './MissionHandler';
 import { PetHandler } from './PetHandler';
@@ -1447,9 +1446,14 @@ export class LevelHandler {
             if (!other.playerSpawned || getClientLevelScope(other) !== scopeKey) {
                 continue;
             }
+            if (
+                LevelHandler.shouldEagerShareEastWingBossIntro(levelName) &&
+                !sharesRoomIds(other.currentRoomId, roomId)
+            ) {
+                continue;
+            }
             LevelHandler.markRoomEventStarted(other, roomId);
             MissionHandler.noteDungeonCutsceneStart(other, roomId);
-            MovementAuthority.resetFromEntity(other, other.entities.get(other.clientEntID), 'cutscene_start');
             LevelHandler.markSharedDungeonCutsceneParticipant(other, roomId, 0);
             other.send(0xA5, payload);
         }
@@ -1490,7 +1494,6 @@ export class LevelHandler {
             if (!other.playerSpawned || getClientLevelScope(other) !== scopeKey) {
                 continue;
             }
-            MovementAuthority.resetFromEntity(other, other.entities.get(other.clientEntID), 'cutscene_end');
             other.send(0xA6, payload);
             MissionHandler.noteDungeonCutsceneEnd(other, roomId);
         }
@@ -2859,7 +2862,6 @@ export class LevelHandler {
         EntityHandler.removeOwnedEntities(client);
         client.clientEntID = 0;
         client.playerSpawned = false;
-        MovementAuthority.reset(client, 'level_transfer_clear');
         client.pendingLoot.clear();
         client.processedRewardSources.clear();
         client.triggeredLevelStates.clear();
@@ -4199,6 +4201,14 @@ export class LevelHandler {
         includeSender: boolean = false
     ): void {
         for (const other of LevelHandler.forLevelRecipients(client, includeSender)) {
+            if (
+                LevelHandler.shouldEagerShareEastWingBossIntro(client.currentLevel) &&
+                !sharesRoomIds(other.currentRoomId, roomId)
+            ) {
+                // Keep shared state scope-wide, but only show cinematic
+                // borders/camera to players inside the triggering room.
+                continue;
+            }
             const levelScope = getClientLevelScope(other);
             const alreadyStarted = LevelHandler.hasRoomEventStarted(other, roomId);
             const alreadyParticipant = LevelHandler.isSharedDungeonCutsceneParticipant(other, levelScope, roomId);
@@ -5435,12 +5445,19 @@ export class LevelHandler {
         }
         const levelScope = getClientLevelScope(client);
         const canonicalBossId = EntityHandler.resolveEntityAlias(client, bossId);
-        LevelHandler.setServerAuthorityHostilesUntargetableForScope(levelScope, roomId, true);
-        LevelHandler.setServerAuthorityHostileUntargetableById(levelScope, canonicalBossId, true);
+        if (!suppressedFinishedIntro) {
+            LevelHandler.setServerAuthorityHostilesUntargetableForScope(levelScope, roomId, true);
+            LevelHandler.setServerAuthorityHostileUntargetableById(levelScope, canonicalBossId, true);
+        }
         markRoomBossEntity(levelScope, canonicalBossId, roomId, bossName);
         noteDungeonRunBossCutscene(levelScope, roomId, canonicalBossId);
 
-        LevelHandler.relayToLevel(client, 0xAC, data);
+        if (
+            !LevelHandler.shouldEagerShareEastWingBossIntro(client.currentLevel) ||
+            (!suppressedFinishedIntro && !LevelHandler.relaySharedDungeonCutscenePacketToParticipants(client, roomId, 0xAC, data))
+        ) {
+            LevelHandler.relayToLevel(client, 0xAC, data);
+        }
     }
 
     static handleSetUntargetable(client: Client, data: Buffer): void {
@@ -5836,29 +5853,6 @@ export class LevelHandler {
         const isSelf =
             EntityHandler.isClientOwnPlayerEntity(client, getClientLevelScope(client), entityId, ent) ||
             EntityHandler.isClientOwnPlayerEntity(client, getClientLevelScope(client), rawEntityId, ent);
-        if (isSelf && !isDefeatEntState) {
-            const movementResult = MovementAuthority.validateIncrementalMovement(client, ent, deltaX, deltaY);
-            if (!movementResult.accepted) {
-                const correctionDeltaX = Math.round(movementResult.lastAcceptedX - movementResult.attemptedX);
-                const correctionDeltaY = Math.round(movementResult.lastAcceptedY - movementResult.attemptedY);
-                if (correctionDeltaX !== 0 || correctionDeltaY !== 0) {
-                    client.send(
-                        0x07,
-                        LevelHandler.buildEntityIncrementalUpdatePayload(
-                            rawEntityId,
-                            correctionDeltaX,
-                            correctionDeltaY,
-                            0,
-                            entState,
-                            flags,
-                            false,
-                            0
-                        )
-                    );
-                }
-                return;
-            }
-        }
         const canonicalEntity = levelEntity ?? ent;
         const isEnemyCanonical =
             !isSelf &&

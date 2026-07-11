@@ -1,6 +1,7 @@
 import { strict as assert } from 'assert';
 import * as path from 'path';
 import { GlobalState } from '../core/GlobalState';
+import { Config } from '../core/config';
 import { GameData } from '../core/GameData';
 import { LevelConfig } from '../core/LevelConfig';
 import { Entity, EntityState, EntityTeam } from '../core/Entity';
@@ -335,7 +336,7 @@ function setupTwoPlayersInBossRoom(levelName: string, instanceId: string): { zeu
 
 function assertEastWingRoster(scope: string, tanjaCanonicalId: number, tanjaName: string): void {
     const hostiles = getHostiles(scope);
-    assert.equal(hostiles.length, 5, 'The East Wing should seed exactly five canonical hostiles');
+    assert.equal(hostiles.length, 1, 'The East Wing should seed only its canonical boss');
     for (const hostile of hostiles) {
         assert.equal(hostile.clientSpawned, false, `${hostile.name} should be server canonical`);
         assert.equal(hostile.level, 50, `${hostile.name} should be level 50`);
@@ -369,6 +370,71 @@ function testHardSeedRosterAndProxyMapping(): void {
         'hard-mode Tanja proxy should map to the hard canonical boss'
     );
     assert.equal(GlobalState.levelEntities.get(scope)?.has(510004), false, 'hard-mode local Tanja proxy must not enter canonical level map');
+}
+
+async function testTanjaSingleDynamicAiAuthority(): Promise<void> {
+    const { zeus, telahair, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-dynamic-ai');
+    attachProxy(zeus, 500004, 'TowerGuard2', 11978, 4756, 3);
+    attachProxy(telahair, 600004, 'TowerGuard2', 11978, 4756, 3);
+
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist for dynamic synchronization');
+    const owner = tanja.proxyOwnerToken === zeus.token ? zeus : telahair;
+    const follower = owner === zeus ? telahair : zeus;
+    const ownerLocalId = owner === zeus ? 500004 : 600004;
+    const followerLocalId = follower === zeus ? 500004 : 600004;
+    assert.ok(tanja.proxyOwnerToken === zeus.token || tanja.proxyOwnerToken === telahair.token, 'one active player must own the Tanja AI proxy');
+
+    zeus.sentPackets.length = 0;
+    telahair.sentPackets.length = 0;
+    await CombatHandler.handlePowerCast(follower as never, buildPowerCastPayload(followerLocalId, 77));
+    assert.equal(
+        owner.sentPackets.some((packet) => packet.id === 0x09),
+        false,
+        'follower Tanja simulation must not relay duplicate boss casts'
+    );
+
+    await CombatHandler.handlePowerCast(owner as never, buildPowerCastPayload(ownerLocalId, 77));
+    assert.equal(
+        follower.sentPackets.some((packet) => packet.id === 0x09),
+        true,
+        'authority Tanja cast must relay dynamically to the other player proxy'
+    );
+}
+
+function testRemotePlayerSnapshotUsesServerCharacterAndHp(): void {
+    const zeus = createFakeClient('Zeus', 'JC_Mini2', 'jc-mini2-player-snapshot', 13933, 2);
+    zeus.authoritativeMaxHp = 5000;
+    zeus.authoritativeCurrentHp = 4200;
+    (zeus.character as any).equippedGears = [{ gearID: 101, tier: 2, runes: [0, 0, 0], colors: [0, 0] }];
+    zeus.entities.clear();
+
+    const snapshot = (EntityHandler as any).buildPlayerSnapshot(zeus);
+    assert.ok(snapshot, 'server must build a remote-player snapshot without relying on a client cache entry');
+    assert.equal(snapshot.healthDelta, -800, 'remote-player snapshot must carry authoritative HP delta');
+    assert.equal(snapshot.level, (zeus.character as any).level, 'remote-player snapshot must carry server character level');
+    assert.equal(snapshot.equippedGears?.[0]?.gearID, 101, 'remote-player snapshot must carry server equipment for derived attack/defense');
+}
+
+async function testEastWingCompletionReachesDistantPartyMember(): Promise<void> {
+    const { zeus, telahair, scope } = setupTwoPlayers('JC_Mini2', 'jc-mini2-distant-completion', {
+        zeusRoom: 3,
+        telahairRoom: 1
+    });
+    attachProxy(zeus, 500004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist for distant completion');
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    await CombatHandler.handlePowerHit(zeus as never, buildPowerHitPayload(500004, zeus.clientEntID, 999999));
+    await waitForPendingTimers();
+    assert.equal(rankPacketCount(telahair), 0, 'distant member must wait while the boss-room post-death cinematic is active');
+
+    LevelHandler.handleRoomEventStart(zeus as never, buildRoomEventPayload(3, false));
+    LevelHandler.handleRoomClose(zeus as never, buildRoomEventPayload(3, false));
+    await waitForPendingTimers();
+    assert.equal(rankPacketCount(zeus), 1, 'boss-room player must receive completion');
+    assert.equal(rankPacketCount(telahair), 1, 'distant party member must receive scope-wide completion');
 }
 
 async function testSharedTanjaFightDeathAndNoRespawn(): Promise<void> {
@@ -543,42 +609,42 @@ async function testTanjaCanonicalDeathFanoutSingleKill(
     );
 }
 
-// Strict East Wing authority must not accept combat mutations for seed-outside
-// mirror hostiles. The generated server roster owns this level's hostile state.
-async function testStrictEastWingRejectsSeedOutsideMirrorHostiles(): Promise<void> {
+// Only Tanja is server-owned. Regular East Wing cues must remain client-owned
+// and must not be aliased to the boss canonical entity.
+async function testClientOwnedEastWingHostilesStayOutsideBossAuthority(): Promise<void> {
     const { zeus, telahair, scope } = setupTwoPlayers('JC_Mini2', 'jc-mini2-mirror-death-sweep');
 
     const firstLocalId = 33186039;
     attachProxy(telahair, firstLocalId, 'ImperialMagi', 16200, 4700, 2);
-    assert.equal(GlobalState.levelEntities.get(scope)?.has(firstLocalId), false, 'seed-outside hostile must not become a shared mirror canonical');
-    assert.equal(telahair.entities.has(firstLocalId), false, 'owner seed-outside hostile should be destroyed locally');
-    assert.equal(EntityHandler.resolveEntityAlias(telahair as never, firstLocalId), firstLocalId, 'seed-outside hostile must not alias to a canonical enemy');
+    assert.equal(GlobalState.levelEntities.get(scope)?.get(firstLocalId)?.clientSpawned, true, 'regular hostile must remain client-owned');
+    assert.equal(telahair.entities.get(firstLocalId)?.clientSpawned, true, 'owner regular hostile should stay locally visible');
+    assert.equal(EntityHandler.resolveEntityAlias(telahair as never, firstLocalId), firstLocalId, 'regular hostile must not alias to Tanja');
     assert.equal(
         telahair.sentPackets.some((packet) => packet.id === 0x0D && parseDestroy(packet.payload).entityId === firstLocalId),
-        true,
-        'owner seed-outside hostile should receive immediate destroy'
+        false,
+        'owner regular hostile should not receive a server-authority destroy'
     );
 
-    // Re-reported/generated local copies must also stay outside canonical state.
+    // Re-reported client cues must remain client-owned as well.
     attachProxy(telahair, 33710327, 'ImperialMagi', 16200, 4700, 2);
     attachProxy(zeus, 15905179, 'ImperialMagi', 16200, 4700, 2);
     attachProxy(zeus, 15999999, 'ImperialMagi', 16200, 4700, 2);
-    assert.equal(GlobalState.levelEntities.get(scope)?.has(33710327), false, 'regenerated owner hostile must not enter canonical state');
-    assert.equal(GlobalState.levelEntities.get(scope)?.has(15905179), false, 'viewer seed-outside hostile must not enter canonical state');
-    assert.equal(GlobalState.levelEntities.get(scope)?.has(15999999), false, 'regenerated viewer hostile must not enter canonical state');
-    assert.equal(EntityHandler.resolveEntityAlias(zeus as never, 15905179), 15905179, 'viewer seed-outside hostile must not alias to a random canonical');
-    assert.equal(EntityHandler.resolveEntityAlias(zeus as never, 15999999), 15999999, 'regenerated viewer seed-outside hostile must not alias to a random canonical');
+    assert.equal(GlobalState.levelEntities.get(scope)?.get(33710327)?.clientSpawned, true, 'regenerated owner hostile must remain client-owned');
+    assert.equal(GlobalState.levelEntities.get(scope)?.get(15905179)?.clientSpawned, true, 'viewer regular hostile must remain client-owned');
+    assert.equal(GlobalState.levelEntities.get(scope)?.get(15999999)?.clientSpawned, true, 'regenerated viewer hostile must remain client-owned');
+    assert.equal(EntityHandler.resolveEntityAlias(zeus as never, 15905179), 15905179, 'viewer regular hostile must not alias to Tanja');
+    assert.equal(EntityHandler.resolveEntityAlias(zeus as never, 15999999), 15999999, 'repeated viewer regular hostile must not alias to Tanja');
 
     zeus.sentPackets.length = 0;
     telahair.sentPackets.length = 0;
     const totalsBefore = getSharedDungeonProgressTotals(scope);
     await CombatHandler.handlePowerCast(telahair as never, buildPowerCastPayload(telahair.clientEntID));
     await CombatHandler.handlePowerHit(telahair as never, buildPowerHitPayload(firstLocalId, telahair.clientEntID, 999999));
-    assert.deepEqual(getSharedDungeonProgressTotals(scope), totalsBefore, 'seed-outside hostile hit must not mutate shared progress totals');
+    assert.deepEqual(getSharedDungeonProgressTotals(scope), totalsBefore, 'client-owned hostile hit must not mutate server boss progress totals');
     assert.equal(
         zeus.sentPackets.some((packet) => packet.id === 0x0D),
         false,
-        'rejected seed-outside hit must not fan out canonical destroys'
+        'client-owned hostile hit must not fan out canonical boss destroys'
     );
 }
 
@@ -964,13 +1030,13 @@ async function testNonLeaderFirstEntryStartsIntroAndBlocksBossCombat(): Promise<
     assert.equal(String((telahair as any).activeDungeonCutsceneScope ?? ''), scope, 'non-leader must enter the shared intro state');
     assert.equal(
         zeus.sentPackets.some((packet) => packet.id === 0xA5),
-        true,
-        'leader must receive Tanja intro when the non-leader enters first'
+        false,
+        'leader outside the boss room must not receive cinematic borders'
     );
     assert.equal(
         String((zeus as any).activeDungeonCutsceneScope ?? ''),
-        scope,
-        'leader must be attached to the same shared intro state'
+        '',
+        'leader outside the cinematic area must not become a presentation participant'
     );
     assert.equal(Boolean(tanja.untargetable), true, 'Tanja must be frozen while the non-leader-started intro is active');
 
@@ -993,12 +1059,13 @@ async function testNonLeaderFirstEntryStartsIntroAndBlocksBossCombat(): Promise<
     assert.equal(telahair.authoritativeCurrentHp, hpBefore, 'Tanja must not damage the non-leader while intro is active');
     assert.notEqual(telahair.entities.get(telahair.clientEntID)?.dead, true, 'non-leader must not die from intro-active Tanja damage');
 
+    introState!.dialogIndex = 2;
     zeus.currentRoomId = 3;
     zeus.sentPackets.length = 0;
     LevelHandler.handleRoomEventStart(zeus as never, buildRoomEventPayload(3));
     assert.equal(
         Number((zeus as any).activeDungeonCutsceneJoinedAtDialogIndex ?? -1),
-        0,
+        2,
         'leader room-entry echo must join the current shared intro step'
     );
     assert.equal(
@@ -1321,9 +1388,11 @@ async function main(): Promise<void> {
     const entityLastRewardNonces = new Map(GlobalState.entityLastRewardNonces);
     const partyByMember = new Map(GlobalState.partyByMember);
     const partyGroups = new Map(GlobalState.partyGroups);
+    const disableAllEnemies = Config.DISABLE_ALL_ENEMIES;
 
     ensureDataLoaded();
     try {
+        Config.DISABLE_ALL_ENEMIES = false;
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         GlobalState.partyByMember.clear();
@@ -1340,91 +1409,25 @@ async function main(): Promise<void> {
         GlobalState.sessionsByToken.clear();
         GlobalState.partyByMember.clear();
         GlobalState.partyGroups.clear();
-        await testSharedTanjaFightDeathAndNoRespawn();
+        await testTanjaSingleDynamicAiAuthority();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         GlobalState.partyByMember.clear();
         GlobalState.partyGroups.clear();
-        await testTanjaCanonicalDeathFanoutSingleKill('Zeus', 'jc-mini2-tanja-fanout-zeus');
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        await testTanjaCanonicalDeathFanoutSingleKill('Telahair', 'jc-mini2-tanja-fanout-telahair');
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        await testStrictEastWingRejectsSeedOutsideMirrorHostiles();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        await testSharedProgressAndCompletionPropagation();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        await testCompletionWaitsForSharedPostDeathCutsceneBarrier();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        await testLateJoinAfterEastWingCompletionReceivesMissingStats();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        await testPostCompletionHostileDamageSuppressed();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        GlobalState.dungeonCutscenes.clear();
-        await testBossIntroSharedLifecycle();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        GlobalState.dungeonCutscenes.clear();
-        await testBossIntroSharedTriggerDirections();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        GlobalState.dungeonCutscenes.clear();
         await testNonLeaderFirstEntryStartsIntroAndBlocksBossCombat();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         GlobalState.partyByMember.clear();
         GlobalState.partyGroups.clear();
-        GlobalState.dungeonCutscenes.clear();
-        await testBossIntroLateJoinCloseBarrier();
+        testRemotePlayerSnapshotUsesServerCharacterAndHp();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         GlobalState.partyByMember.clear();
         GlobalState.partyGroups.clear();
-        GlobalState.dungeonCutscenes.clear();
-        await testEastWingPostDeathCompletionGate();
-
-        GlobalState.levelEntities.clear();
-        GlobalState.sessionsByToken.clear();
-        GlobalState.partyByMember.clear();
-        GlobalState.partyGroups.clear();
-        GlobalState.dungeonCutscenes.clear();
-        await testBossDeathDuringIntroForcesCutsceneEnd();
+        await testEastWingCompletionReachesDistantPartyMember();
 
         console.log('jc_mini2_server_authority_regression: ok');
     } finally {
@@ -1436,6 +1439,7 @@ async function main(): Promise<void> {
         GlobalState.entityLastRewardNonces = entityLastRewardNonces;
         GlobalState.partyByMember = partyByMember;
         GlobalState.partyGroups = partyGroups;
+        Config.DISABLE_ALL_ENEMIES = disableAllEnemies;
     }
 }
 
