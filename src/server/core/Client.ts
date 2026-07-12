@@ -169,6 +169,7 @@ export class Client {
     public entryY: number = 0;
     public entryHasCoord: boolean = false;
     public currentRoomId: number = -1;
+    public lostAtSeaRoomStateId: number | null = null;
     public lastDoorId: number = -1;
     public lastDoorTargetLevel: string = "";
     public playerSpawned: boolean = false;
@@ -193,6 +194,7 @@ export class Client {
     public pendingMissionTurnIns: Set<number> = new Set();
     public authoritativeMaxHp: number = 100;
     public authoritativeCurrentHp: number = 100;
+    public pendingAuthoritativePlayerDamageReports: Array<{ amount: number; recordedAt: number }> = [];
     public combatStatsDirty: boolean = false;
     public allowDirtyCombatStatsRegen: boolean = false;
     public lastCombatStatsRefreshRequestAt: number = 0;
@@ -428,6 +430,7 @@ export class Client {
         this.entryY = 0;
         this.entryHasCoord = false;
         this.currentRoomId = -1;
+        this.lostAtSeaRoomStateId = null;
         this.lastDoorId = -1;
         this.lastDoorTargetLevel = "";
         this.playerSpawned = false;
@@ -450,6 +453,7 @@ export class Client {
         this.pendingMissionTurnIns.clear();
         this.authoritativeMaxHp = 100;
         this.authoritativeCurrentHp = 100;
+        this.pendingAuthoritativePlayerDamageReports = [];
         this.combatStatsDirty = false;
         this.allowDirtyCombatStatsRegen = false;
         this.lastCombatStatsRefreshRequestAt = 0;

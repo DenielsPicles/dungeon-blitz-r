@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -15,7 +15,9 @@
     "start:discord-bridge:multiplayer": "node tools/startDiscordBridge.js",
     "reset-password": "ts-node scripts/set_account_password.ts",
     "validate:east-wing-spawns": "node tools/exportTheEastWingEnemies.js",
-    "validate:dungeon-spawns": "node tools/exportTheEastWingEnemies.js"
+    "validate:dungeon-spawns": "node tools/exportTheEastWingEnemies.js",
+    "export:lost-at-sea-spawns": "node tools/exportLostAtSeaEnemies.js",
+    "validate:lost-at-sea-spawns": "node tools/exportLostAtSeaEnemies.js --verify"
   },
   "keywords": [],
   "author": "",

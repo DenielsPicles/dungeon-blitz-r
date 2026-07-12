@@ -27,6 +27,7 @@ import { sendConsumableUpdate } from '../utils/ConsumableState';
 import { LevelConfig } from '../core/LevelConfig';
 import { isRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
+import { LostAtSeaScene } from '../core/LostAtSeaScene';
 import { RewardHandler } from './RewardHandler';
 import {
     buildEastWingDeathEventId,
@@ -879,6 +880,41 @@ export class CombatHandler {
         bb.writeMethod15(false);
         bb.writeMethod15(false);
         return bb.toBuffer();
+    }
+
+    private static rememberAuthoritativePlayerDamage(targetSession: Client, amount: number): void {
+        const damage = Math.max(0, Math.round(Number(amount) || 0));
+        if (damage <= 0) {
+            return;
+        }
+
+        const nowMs = Date.now();
+        targetSession.pendingAuthoritativePlayerDamageReports = (
+            targetSession.pendingAuthoritativePlayerDamageReports ?? []
+        )
+            .filter((entry) => nowMs - Math.max(0, Number(entry.recordedAt ?? 0)) <= 2500)
+            .concat({ amount: damage, recordedAt: nowMs })
+            .slice(-8);
+    }
+
+    private static consumeAuthoritativePlayerDamageReport(client: Client, amount: number): boolean {
+        const damage = Math.max(0, Math.round(Math.abs(Number(amount) || 0)));
+        if (damage <= 0) {
+            return false;
+        }
+
+        const nowMs = Date.now();
+        const pending = (client.pendingAuthoritativePlayerDamageReports ?? [])
+            .filter((entry) => nowMs - Math.max(0, Number(entry.recordedAt ?? 0)) <= 2500);
+        const matchIndex = pending.findIndex((entry) => Math.max(0, Math.round(Number(entry.amount ?? 0))) === damage);
+        if (matchIndex < 0) {
+            client.pendingAuthoritativePlayerDamageReports = pending;
+            return false;
+        }
+
+        pending.splice(matchIndex, 1);
+        client.pendingAuthoritativePlayerDamageReports = pending;
+        return true;
     }
 
     private static buildEntityStatePayloadFromParts(
@@ -5392,6 +5428,33 @@ export class CombatHandler {
         CombatHandler.broadcastToCombatRoom(targetSession, 0x07, payload, false, [targetSession.clientEntID]);
     }
 
+    private static sendAuthoritativePlayerActiveState(targetSession: Client, roomScoped: boolean = false): void {
+        if (!targetSession.playerSpawned || !targetSession.currentLevel || targetSession.clientEntID <= 0) {
+            return;
+        }
+
+        const levelScope = getClientLevelScope(targetSession);
+        const entity = targetSession.entities.get(targetSession.clientEntID) ??
+            CombatHandler.resolveLevelEntity(levelScope, targetSession.clientEntID);
+        const facingLeft = Boolean(entity?.facingLeft);
+        const payload = CombatHandler.buildEntityStatePayload(targetSession.clientEntID, EntityState.ACTIVE, facingLeft);
+        targetSession.send(0x07, payload);
+
+        for (const other of GlobalState.sessionsByToken.values()) {
+            if (
+                other === targetSession ||
+                !other.playerSpawned ||
+                getClientLevelScope(other) !== levelScope ||
+                (roomScoped && !sharesRoomIds(other.currentRoomId, targetSession.currentRoomId)) ||
+                !CombatHandler.canViewerResolveAnchoredCombatEntity(other, targetSession, levelScope, targetSession.clientEntID)
+            ) {
+                continue;
+            }
+
+            CombatHandler.sendTranslatedPacket(other, 0x07, payload);
+        }
+    }
+
     private static getEntityPosition(entity: any): CombatPoint | null {
         if (!entity || typeof entity !== 'object') {
             return null;
@@ -6756,6 +6819,7 @@ export class CombatHandler {
         } | null = null;
         let partySharedHostileDeathRelay: { entityId: number; entity: any; anchor: Client } | null = null;
         let serverAuthorityNpcSnapshots = new Map<number, HostileViewerHealthSnapshot>();
+        let playerHitResolution: { appliedDamage: number; killed: boolean } | null = null;
         const targetSession = CombatHandler.findPlayerSessionByEntityId(targetId);
         if (targetSession && areClientsInSameLevelScope(client, targetSession)) {
             if (
@@ -6778,10 +6842,14 @@ export class CombatHandler {
                 return;
             }
             const resolution = CombatHandler.updatePlayerTargetAfterHit(targetSession, damage);
+            playerHitResolution = resolution;
             relayDamage = resolution.appliedDamage;
 
             if (resolution.appliedDamage > 0 && !isHostileNpcSource) {
                 CombatHandler.broadcastPlayerHpDelta(targetSession, -resolution.appliedDamage);
+            }
+            if (resolution.appliedDamage > 0 && isHostileNpcSource) {
+                CombatHandler.rememberAuthoritativePlayerDamage(targetSession, resolution.appliedDamage);
             }
 
             if (resolution.killed) {
@@ -7022,6 +7090,9 @@ export class CombatHandler {
         if (isHostileNpcSource) {
             const excludeLocalVictim = targetSession === client ? client : null;
             CombatHandler.broadcastEntityViewPacket(levelScope, sourceEntity, 0x0A, relayPayload, [targetId, sourceId], excludeLocalVictim);
+            if (targetSession && playerHitResolution && playerHitResolution.appliedDamage > 0 && !playerHitResolution.killed) {
+                CombatHandler.sendAuthoritativePlayerActiveState(targetSession, true);
+            }
             consumePartySharedHostileDeathRelay();
             return;
         }
@@ -7329,7 +7400,7 @@ export class CombatHandler {
             }
             const levelMap = GlobalState.levelEntities.get(levelScope);
             levelMap?.delete(entityId);
-            if (levelMap && levelMap.size === 0) {
+            if (levelMap && levelMap.size === 0 && !LostAtSeaScene.shouldPreserveScope(levelScope)) {
                 GlobalState.levelEntities.delete(levelScope);
             }
             if (contributionSnapshot?.contributors?.length) {
@@ -7737,6 +7808,17 @@ export class CombatHandler {
                 entityId,
                 amount,
                 entityHp: Math.round(Number(entity?.hp ?? 0)),
+                authHp: Math.round(Number(client.authoritativeCurrentHp ?? 0)),
+                authMax: Math.round(Number(client.authoritativeMaxHp ?? 0))
+            }, CombatHandler.PLAYER_HP_LOG_THROTTLE_MS);
+            return;
+        }
+
+        if (amount < 0 && CombatHandler.consumeAuthoritativePlayerDamageReport(client, amount)) {
+            CombatHandler.logPlayerHp('client-hp-authoritative-confirmed', client, {
+                rawEntityId,
+                entityId,
+                amount,
                 authHp: Math.round(Number(client.authoritativeCurrentHp ?? 0)),
                 authMax: Math.round(Number(client.authoritativeMaxHp ?? 0))
             }, CombatHandler.PLAYER_HP_LOG_THROTTLE_MS);

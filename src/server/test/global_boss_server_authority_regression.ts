@@ -171,29 +171,34 @@ function testGlobalBossRegistry(): void {
     assert.equal(globalBossLevels.length, 130, 'global registry must cover every authored boss level not already using legacy server authority');
 
     let bossCount = 0;
+    let serverHostileCount = 0;
     const ids = new Set<number>();
     const spawnKeys = new Set<string>();
     for (const levelName of globalBossLevels) {
         const config = DungeonSpawnLoader.getSpawnConfigForLevel(levelName);
         assert.ok(config, `${levelName} must have a boss spawn config`);
-        assert.ok(config.enemies.length > 0, `${levelName} must export at least one boss`);
-        for (const boss of config.enemies) {
-            bossCount += 1;
-            assert.equal(boss.serverSpawn, true, `${levelName}/${boss.type} must be server-spawned`);
-            assert.equal(boss.boss, true, `${levelName}/${boss.type} must be classified as a boss`);
-            assert.notEqual(boss.miniboss, true, `${levelName}/${boss.type} must not broaden the feature to minibosses`);
-            assert.ok(Number.isFinite(Number(boss.x)) && Number.isFinite(Number(boss.y)), `${levelName}/${boss.type} needs finite coordinates`);
-            assert.ok(!ids.has(Number(boss.canonicalId)), `${levelName}/${boss.type} canonical id must be globally unique`);
-            assert.ok(!spawnKeys.has(String(boss.spawnKey)), `${levelName}/${boss.type} spawn key must be globally unique`);
-            ids.add(Number(boss.canonicalId));
-            spawnKeys.add(String(boss.spawnKey));
+        assert.ok(config.enemies.length > 0, `${levelName} must export at least one server-authority hostile`);
+        assert.ok(config.enemies.some((enemy) => enemy.boss === true), `${levelName} must preserve at least one authored boss`);
+        for (const enemy of config.enemies) {
+            serverHostileCount += 1;
+            if (enemy.boss === true) {
+                bossCount += 1;
+            }
+            assert.equal(enemy.serverSpawn, true, `${levelName}/${enemy.type} must be server-spawned`);
+            assert.notEqual(enemy.miniboss, true, `${levelName}/${enemy.type} must not broaden the feature to minibosses`);
+            assert.ok(Number.isFinite(Number(enemy.x)) && Number.isFinite(Number(enemy.y)), `${levelName}/${enemy.type} needs finite coordinates`);
+            assert.ok(!ids.has(Number(enemy.canonicalId)), `${levelName}/${enemy.type} canonical id must be globally unique`);
+            assert.ok(!spawnKeys.has(String(enemy.spawnKey)), `${levelName}/${enemy.type} spawn key must be globally unique`);
+            ids.add(Number(enemy.canonicalId));
+            spawnKeys.add(String(enemy.spawnKey));
         }
     }
-    assert.equal(bossCount, 160, 'global registry must preserve all newly server-owned boss slots');
+    assert.equal(bossCount, 160, 'global registry must preserve all authored server-owned boss slots');
+    assert.ok(serverHostileCount >= bossCount, 'scripted dungeon waves may add server-owned non-boss hostiles without changing boss coverage');
 
     for (const levelName of WOLFS_END_BOSS_LEVELS) {
-        assert.equal(EntityHandler.hasServerSpawnedHostiles(levelName), true, `${levelName} must enable boss-only server spawning`);
-        assert.ok(DungeonSpawnLoader.getNpcsForLevel(levelName).length > 0, `${levelName} must expose its canonical boss seed`);
+        assert.equal(EntityHandler.hasServerSpawnedHostiles(levelName), true, `${levelName} must enable server-authority hostile spawning`);
+        assert.ok(DungeonSpawnLoader.getNpcsForLevel(levelName).length > 0, `${levelName} must expose its canonical hostile seed`);
     }
 }
 

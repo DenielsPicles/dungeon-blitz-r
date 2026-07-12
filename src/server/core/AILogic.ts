@@ -9,6 +9,7 @@ import { Client } from './Client';
 import { sharesRoomIds } from './PartySync';
 import { getClientLevelScope, getScopeLevelName } from './LevelScope';
 import { LevelConfig } from './LevelConfig';
+import { LostAtSeaScene } from './LostAtSeaScene';
 
 
 export class AILogic {
@@ -68,6 +69,7 @@ export class AILogic {
         if (!levelEntities) return;
         const levelName = getScopeLevelName(levelScope);
         const nowMs = Date.now();
+        LostAtSeaScene.advanceScope(levelScope, nowMs);
 
         const players: Client[] = [];
         const activeCutsceneRoomIds = new Set<number>();

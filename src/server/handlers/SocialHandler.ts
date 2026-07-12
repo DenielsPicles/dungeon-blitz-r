@@ -27,6 +27,7 @@ import {
     sanitizeSocialText
 } from '../core/SocialState';
 import { areClientsInSameLevelScope, getClientLevelScope } from '../core/LevelScope';
+import { LostAtSeaScene } from '../core/LostAtSeaScene';
 
 const db = new JsonAdapter();
 
@@ -2049,8 +2050,12 @@ export class SocialHandler {
 
     static handleLevelState(client: Client, data: Buffer): void {
         const br = new BitReader(data);
-        br.readMethod26();
-        br.readMethod26();
+        const stateKey = br.readMethod26();
+        const value = br.readMethod26();
+
+        if (LostAtSeaScene.handleLevelStateSyncRequest(client, stateKey, value)) {
+            return;
+        }
 
         SocialHandler.relayToLevel(client, 0x40, data);
     }
