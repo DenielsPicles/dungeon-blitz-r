@@ -1365,7 +1365,7 @@ export class RewardHandler {
         const sourceLootDropNonce = String(options.lootDropNonce ?? '');
         const caller = String(options.caller ?? 'grantServerEnemyRewardToEligibleViewers');
         if (
-            EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope)) &&
+            EntityHandler.isServerAuthorityHostileEntity(levelScope, sourceEntity) &&
             (
                 sourceEnemyCanonicalId !== sourceId ||
                 !RewardHandler.isCanonicalDeathLootContextValid(levelScope, sourceEnemyCanonicalId, sourceLootDropNonce)

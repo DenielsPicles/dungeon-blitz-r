@@ -121,6 +121,12 @@ export class EntityHandler {
         return EntityHandler.SERVER_AUTHORITY_HOSTILE_LEVELS.has(LevelConfig.normalizeLevelName(levelName));
     }
 
+    static hasServerSpawnedHostiles(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(getScopeLevelName(String(levelName ?? '')));
+        return EntityHandler.usesServerAuthorityHostiles(normalizedLevel) ||
+            DungeonSpawnLoader.hasLevel(normalizedLevel);
+    }
+
     static markRejectedServerAuthorityLocalEntityId(client: Client, levelScope: string | null | undefined, entityId: number): void {
         const scopeKey = String(levelScope ?? '').trim();
         const localId = Math.max(0, Math.round(Number(entityId) || 0));
@@ -303,7 +309,7 @@ export class EntityHandler {
     static noteServerAuthorityHostileDestroyed(levelScope: string, entityId: number, entity: any = null, killerToken: number = 0): void {
         const scopeKey = String(levelScope ?? '').trim();
         const id = Math.max(0, Math.round(Number(entityId) || 0));
-        if (!scopeKey || id <= 0 || !EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(scopeKey))) {
+        if (!scopeKey || id <= 0 || !EntityHandler.hasServerSpawnedHostiles(getScopeLevelName(scopeKey))) {
             return;
         }
 
@@ -484,11 +490,17 @@ export class EntityHandler {
     }
 
     static isServerAuthorityHostileEntity(levelNameOrScope: string | null | undefined, entity: any): boolean {
-        return EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(String(levelNameOrScope ?? ''))) &&
+        const levelName = getScopeLevelName(String(levelNameOrScope ?? ''));
+        return EntityHandler.hasServerSpawnedHostiles(levelName) &&
             Boolean(entity) &&
             !Boolean(entity?.isPlayer) &&
             !Boolean(entity?.clientSpawned) &&
-            Number(entity?.team ?? 0) === EntityTeam.ENEMY;
+            Number(entity?.team ?? 0) === EntityTeam.ENEMY &&
+            (
+                EntityHandler.usesServerAuthorityHostiles(levelName) ||
+                Boolean(entity?.serverSpawned) ||
+                Boolean(entity?.generatedFromScript)
+            );
     }
 
     static normalizeServerAuthorityHostileState(levelNameOrScope: string | null | undefined, entity: any): void {
@@ -522,6 +534,7 @@ export class EntityHandler {
         const entityProps = {
             ...Entity.fromNpc(npc),
             clientSpawned: false,
+            serverSpawned: Boolean(npc.serverSpawned ?? npc.serverSpawn),
             serverAuthorityHostile: true,
             canonicalId: Number(npc.canonicalId ?? npc.id ?? 0),
             entType: String(npc.entType ?? npc.name ?? ''),
@@ -557,7 +570,7 @@ export class EntityHandler {
     }
 
     private static seedServerAuthorityHostiles(client: Client, levelName: string, levelMap: Map<number, any>): void {
-        if (Config.DISABLE_ALL_ENEMIES || !EntityHandler.usesServerAuthorityHostiles(levelName)) {
+        if (Config.DISABLE_ALL_ENEMIES || !EntityHandler.hasServerSpawnedHostiles(levelName)) {
             return;
         }
 
@@ -865,7 +878,7 @@ export class EntityHandler {
         entity: any,
         client: Client | null = null
     ): any | null {
-        if (!EntityHandler.usesServerAuthorityHostiles(levelName) || !levelMap || !entity || entity.isPlayer) {
+        if (!EntityHandler.hasServerSpawnedHostiles(levelName) || !levelMap || !entity || entity.isPlayer) {
             return null;
         }
 
@@ -1475,7 +1488,7 @@ export class EntityHandler {
         rawEntityId: number
     ): boolean {
         if (
-            !EntityHandler.usesServerAuthorityHostiles(levelName) ||
+            !EntityHandler.hasServerSpawnedHostiles(levelName) ||
             !entity ||
             entity.isPlayer ||
             Number(entity.team ?? 0) !== EntityTeam.ENEMY
@@ -2060,7 +2073,7 @@ export class EntityHandler {
     }
 
     private static resetServerAuthorityScopeForFreshRun(client: Client, levelName: string, levelMap: Map<number, any>): void {
-        if (!EntityHandler.usesServerAuthorityHostiles(levelName)) {
+        if (!EntityHandler.hasServerSpawnedHostiles(levelName)) {
             return;
         }
 
@@ -2152,7 +2165,7 @@ export class EntityHandler {
             EntityHandler.ensureJcMini1PartySharedScope(client, levelName, reason);
         }
         const levelMap = levelName ? EntityHandler.getLevelMapForClient(client, true) : null;
-        if (levelName && levelMap && EntityHandler.usesServerAuthorityHostiles(levelName)) {
+        if (levelName && levelMap && EntityHandler.hasServerSpawnedHostiles(levelName)) {
             EntityHandler.seedServerAuthorityHostiles(client, levelName, levelMap);
         }
         return EntityHandler.attachServerAuthorityClientHostileProxy(client, levelName, levelMap, entity, rawEntityId);
@@ -2524,7 +2537,7 @@ export class EntityHandler {
 
     private static shouldDeferLiveSharedHostileSeedToJoiner(joiner: Client, entity: any): boolean {
         return Boolean(joiner.currentLevel) &&
-            !EntityHandler.usesServerAuthorityHostiles(joiner.currentLevel) &&
+            !EntityHandler.hasServerSpawnedHostiles(joiner.currentLevel) &&
             EntityHandler.isPartySharedClientSpawnHostile(joiner.currentLevel, entity) &&
             !EntityHandler.isEntityDead(entity);
     }
@@ -2543,9 +2556,7 @@ export class EntityHandler {
         }
 
         if (
-            EntityHandler.usesServerAuthorityHostiles(levelName) &&
-            Number(entity.team ?? 0) === EntityTeam.ENEMY &&
-            !Boolean(entity.clientSpawned)
+            EntityHandler.isServerAuthorityHostileEntity(levelName, entity)
         ) {
             EntityHandler.normalizeServerAuthorityHostileState(levelName, entity);
             return;
@@ -2668,7 +2679,7 @@ export class EntityHandler {
         }
 
         if (
-            EntityHandler.usesServerAuthorityHostiles(levelName) &&
+            EntityHandler.hasServerSpawnedHostiles(levelName) &&
             Number(entity?.team ?? 0) === EntityTeam.ENEMY
         ) {
             return false;
@@ -2972,7 +2983,7 @@ export class EntityHandler {
             !levelName ||
             !levelMap ||
             !LevelConfig.isDungeonLevel(levelName) ||
-            EntityHandler.usesServerAuthorityHostiles(levelName) ||
+            EntityHandler.hasServerSpawnedHostiles(levelName) ||
             !entity ||
             entity.isPlayer ||
             Number(entity.team ?? 0) !== EntityTeam.ENEMY
@@ -4587,7 +4598,7 @@ export class EntityHandler {
                     if (Config.DISABLE_ALL_ENEMIES && EntityHandler.isEnemyEntity(npc)) {
                         continue;
                     }
-                    const entityProps = EntityHandler.usesServerAuthorityHostiles(levelName)
+                    const entityProps = EntityHandler.usesServerAuthorityHostiles(levelName) || Boolean(npc?.serverSpawned)
                         ? EntityHandler.createServerAuthorityEntityFromNpc(client, levelName, npc)
                         : {
                             ...Entity.fromNpc(npc),
@@ -4609,7 +4620,7 @@ export class EntityHandler {
             console.log(`[EntityHandler] Removed ${removedEnemyCount} enemies from ${levelName} for global empty-world testing.`);
         }
 
-        if (EntityHandler.usesServerAuthorityHostiles(levelName) && !Config.DISABLE_ALL_ENEMIES) {
+        if (EntityHandler.hasServerSpawnedHostiles(levelName) && !Config.DISABLE_ALL_ENEMIES) {
             EntityHandler.resetServerAuthorityScopeForFreshRun(client, levelName, levelMap);
             EntityHandler.seedServerAuthorityHostiles(client, levelName, levelMap);
 
@@ -4646,7 +4657,7 @@ export class EntityHandler {
         }
 
         const clientSpawnLevel = EntityHandler.usesClientSpawn(levelName);
-        const serverAuthorityHostiles = EntityHandler.usesServerAuthorityHostiles(levelName);
+        const serverAuthorityHostiles = EntityHandler.hasServerSpawnedHostiles(levelName);
         const canonicalVisibleServerAuthority = EntityHandler.usesCanonicalVisibleServerAuthorityHostiles(levelName);
         const replaceClientHostileWithCanonical = EntityHandler.replacesClientHostileWithCanonical(levelName);
         EntityHandler.logDungeonSpawnServerSnapshot(levelName, getLevelScopeKey(levelName, client.levelInstanceId), client, levelMap);

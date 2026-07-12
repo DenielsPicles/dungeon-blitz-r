@@ -90,7 +90,9 @@ export class NpcLoader {
 
         // Match the Python server: client SWFs already own hostile spawns and
         // some tutorial actors, so only keep server-authored friendly/scripted NPCs.
-        let filtered = npcs.filter((npc) => Number(npc?.team ?? 0) !== 2);
+        let filtered = npcs.filter((npc) =>
+            Number(npc?.team ?? 0) !== 2 || Boolean(npc?.serverSpawned)
+        );
 
         if (levelName === 'TutorialBoat') {
             const bakedNpcs = new Set(['IntroParrot', 'NPCCaptainSteering']);

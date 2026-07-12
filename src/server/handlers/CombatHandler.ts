@@ -4140,8 +4140,7 @@ export class CombatHandler {
     }
 
     private static isServerAuthoritySyncNpc(levelScope: string, entity: any): boolean {
-        return EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope)) &&
-            EntityHandler.isServerAuthorityHostileEntity(levelScope, entity);
+        return EntityHandler.isServerAuthorityHostileEntity(levelScope, entity);
     }
 
     private static canReceiveServerAuthorityNpcRelay(anchor: Client, viewer: Client, levelScope: string): boolean {
@@ -4175,7 +4174,7 @@ export class CombatHandler {
     }
 
     private static refreshServerAuthorityProgressWithRetries(levelScope: string, reason: string): void {
-        if (!EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope))) {
+        if (!EntityHandler.hasServerSpawnedHostiles(getScopeLevelName(levelScope))) {
             return;
         }
 
@@ -6522,12 +6521,12 @@ export class CombatHandler {
         targetEntity: any,
         rawTargetEntity: any
     ): boolean {
-        if (!EntityHandler.usesServerAuthorityHostiles(levelName) || !sourceSession || targetSession || isHostileNpcSource) {
+        if (!sourceSession || targetSession || isHostileNpcSource) {
             return false;
         }
 
         const candidate = targetEntity ?? rawTargetEntity;
-        return Boolean(candidate && !candidate.isPlayer && Number(candidate.team ?? 0) === EntityTeam.ENEMY);
+        return EntityHandler.isServerAuthorityHostileEntity(levelName, candidate);
     }
 
     static async handlePowerCast(client: Client, data: Buffer): Promise<void> {
@@ -7340,7 +7339,7 @@ export class CombatHandler {
             EntityHandler.forgetKnownEntity(levelName, entityId, client.levelInstanceId);
             if (usesSharedDungeonProgress(getScopeLevelName(levelScope)) && destroyedEntity) {
                 LevelHandler.refreshSharedDungeonQuestProgress(levelScope);
-                if (EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope))) {
+                if (EntityHandler.hasServerSpawnedHostiles(getScopeLevelName(levelScope))) {
                     CombatHandler.refreshServerAuthorityProgressWithRetries(levelScope, 'entity_destroy');
                 }
             }
@@ -7513,8 +7512,7 @@ export class CombatHandler {
 
         const levelEntity = CombatHandler.resolveLevelEntity(levelScope, entityId);
         const targetEntity = levelEntity ?? entity;
-        if (EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope))) {
-            if (CombatHandler.isServerAuthoritySyncNpc(levelScope, targetEntity)) {
+        if (CombatHandler.isServerAuthoritySyncNpc(levelScope, targetEntity)) {
                 const canonicalId = Math.max(0, Math.round(Number(targetEntity.id ?? entityId)));
                 if (CombatHandler.isTerminalHostileEntity(targetEntity)) {
                     console.warn(
@@ -7584,33 +7582,6 @@ export class CombatHandler {
                     return true;
                 }
                 return true;
-            }
-
-            logJcMini1Authority('client_hostile_hp_report', {
-                rawEntityId,
-                entityId,
-                amount,
-                source: client.character?.name ?? '',
-                sourceToken: client.token,
-                scope: levelScope,
-                localName: targetEntity?.name ?? '',
-                localTeam: targetEntity?.team ?? '',
-                ignoredForAuthority: true,
-                resolvedCanonical: false
-            });
-            logJcMini1Authority('hostile_hp_rejected_unknown_canonical', {
-                targetId: entityId,
-                rawEntityId,
-                source: client.character?.name ?? '',
-                sourceToken: client.token,
-                scope: levelScope,
-                packetId: '0x78',
-                reason: 'hp_report_unknown_canonical'
-            });
-            console.log(
-                `[MultiplayerSync][hostile_hp_rejected_unknown_canonical] targetId=${entityId} source=${String(client.character?.name ?? '')}`
-            );
-            return true;
         }
 
         if (

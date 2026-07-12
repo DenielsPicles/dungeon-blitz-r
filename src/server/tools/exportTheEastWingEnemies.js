@@ -351,6 +351,44 @@ function parsePlaceObject2(buffer, bodyOffset) {
     };
 }
 
+function parsePlaceObject3(buffer, bodyOffset) {
+    let offset = bodyOffset;
+    const flags = buffer[offset++];
+    const flags2 = buffer[offset++];
+    const depth = buffer.readUInt16LE(offset);
+    offset += 2;
+    let characterId = null;
+    let matrix = null;
+    let name = '';
+
+    const hasClassName = Boolean(flags2 & 0x08);
+    const hasImage = Boolean(flags2 & 0x10);
+    if (hasClassName || (hasImage && Boolean(flags & 0x02))) {
+        offset = readCString(buffer, offset).nextOffset;
+    }
+    if (flags & 0x02) {
+        characterId = buffer.readUInt16LE(offset);
+        offset += 2;
+    }
+    if (flags & 0x04) {
+        const result = readMatrix(buffer, offset);
+        matrix = result.matrix;
+        offset = result.nextOffset;
+    }
+    if (flags & 0x08) {
+        offset = skipColorTransformWithAlpha(buffer, offset);
+    }
+    if (flags & 0x10) {
+        offset += 2;
+    }
+    if (flags & 0x20) {
+        const result = readCString(buffer, offset);
+        name = result.value;
+    }
+
+    return { depth, characterId, matrix, name };
+}
+
 function parseSprites(buffer, startOffset, endOffset, sprites) {
     let offset = startOffset;
     while (offset < endOffset) {
@@ -381,6 +419,8 @@ function parseSpriteTags(buffer, startOffset, endOffset, sprites, placements) {
 
         if (tag.code === 26) {
             placements.push(parsePlaceObject2(buffer, tag.bodyOffset));
+        } else if (tag.code === 70) {
+            placements.push(parsePlaceObject3(buffer, tag.bodyOffset));
         } else if (tag.code === 39) {
             const spriteId = buffer.readUInt16LE(tag.bodyOffset);
             const frameCount = buffer.readUInt16LE(tag.bodyOffset + 2);
@@ -634,4 +674,14 @@ function main() {
     console.log(`[EastWingExport] enemies=${registry.enemies.length} requiredForClear=${requiredCount} bosses=${registry.enemies.filter((enemy) => enemy.boss || enemy.miniboss).length}`);
 }
 
-main();
+if (require.main === module) {
+    main();
+}
+
+module.exports = {
+    getLineNumber,
+    getSymbolId,
+    parseStringLiteral,
+    parseSwfSprites,
+    roundPosition
+};

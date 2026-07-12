@@ -1129,6 +1129,7 @@
     ],
     "source": "level-swf",
     "rooms": [
+      "a_Room_SRCM01_ArachnaeBoss",
       "a_Room_SRConnM12",
       "a_Room_SRConnM20",
       "a_Room_SRConnM22",
@@ -1156,6 +1157,7 @@
     ],
     "source": "level-swf",
     "rooms": [
+      "a_Room_SRCM01_ArachnaeBoss",
       "a_Room_SRConnM12",
       "a_Room_SRConnM20",
       "a_Room_SRConnM22",
@@ -3600,6 +3602,18 @@
       "a_Room_Refuge_R10"
     ]
   },
+  "Castle": {
+    "elements": [],
+    "enemyTypes": [],
+    "source": "no-matching-rooms",
+    "rooms": []
+  },
+  "CastleHard": {
+    "elements": [],
+    "enemyTypes": [],
+    "source": "no-matching-rooms",
+    "rooms": []
+  },
   "AC_Mission1": {
     "elements": [
       "Fire",
@@ -4298,9 +4312,14 @@
   },
   "SD_Mission1": {
     "elements": [
-      "Fire"
+      "Fire",
+      "Air"
     ],
     "enemyTypes": [
+      {
+        "enemyType": "RageGuardian",
+        "count": 1
+      },
       {
         "enemyType": "RaptorHorned",
         "count": 1
@@ -4308,14 +4327,20 @@
     ],
     "source": "level-swf",
     "rooms": [
-      "a_Room_SDMission01"
+      "a_Room_SDMission01",
+      "a_Room_SDMission15"
     ]
   },
   "SD_Mission1Hard": {
     "elements": [
-      "Fire"
+      "Fire",
+      "Air"
     ],
     "enemyTypes": [
+      {
+        "enemyType": "RageGuardianHard",
+        "count": 1
+      },
       {
         "enemyType": "RaptorHornedHard",
         "count": 1
@@ -4323,7 +4348,8 @@
     ],
     "source": "level-swf",
     "rooms": [
-      "a_Room_SDMission01"
+      "a_Room_SDMission01",
+      "a_Room_SDMission15"
     ]
   },
   "SD_Mission2": {
