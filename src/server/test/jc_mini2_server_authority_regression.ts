@@ -1579,6 +1579,62 @@ async function testCanonicalHostileDeathIgnoresLatePositiveReports(): Promise<vo
     assert.equal(Math.max(0, Math.round(Number(tanja.deathVersion ?? 0))), deathVersion, 'late positive report must not recommit death');
 }
 
+async function testCommittedBossDeathIgnoresTeammateDeathRegen(): Promise<void> {
+    const { zeus, telahair, scope } = setupTwoPlayersInBossRoom(
+        'JC_Mini2',
+        'jc-mini2-committed-death-regen'
+    );
+    attachProxy(zeus, 595004, 'TowerGuard2', 11978, 4756, 3);
+    attachProxy(telahair, 695004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    await CombatHandler.handlePowerHit(
+        zeus as never,
+        buildPowerHitPayload(595004, zeus.clientEntID, Math.round(Number(tanja.hp ?? 0)) + 1)
+    );
+
+    assert.equal(tanja.hp, 0, 'lethal hit must leave canonical Tanja at zero HP');
+    assert.equal(tanja.dead, true, 'lethal hit must mark canonical Tanja dead');
+    assert.equal(tanja.destroyed, true, 'lethal hit must finalize canonical Tanja destruction');
+    assert.equal(Boolean(tanja.bossDeathCommitted), true, 'lethal hit must commit the boss death');
+    const deathVersion = Math.max(0, Math.round(Number(tanja.deathVersion ?? 0)));
+
+    zeus.sentPackets.length = 0;
+    telahair.sentPackets.length = 0;
+    const teammateDeathAt = Date.now();
+    CombatHandler.notePlayerDeathState(telahair as never, teammateDeathAt);
+    CombatHandler.processOutOfCombatRegen(scope, teammateDeathAt + 2_000);
+
+    assert.equal(tanja.hp, 0, 'teammate-death regen must not revive a committed boss');
+    assert.equal(tanja.dead, true, 'teammate-death regen must not clear committed boss death');
+    assert.equal(tanja.destroyed, true, 'teammate-death regen must preserve finalized boss destruction');
+    assert.equal(Boolean(tanja.bossDeathCommitted), true, 'teammate-death regen must preserve the boss death commitment');
+    assert.equal(
+        Math.max(0, Math.round(Number(tanja.deathVersion ?? 0))),
+        deathVersion,
+        'teammate-death regen must not create another boss death cycle'
+    );
+    assert.equal(
+        [...zeus.sentPackets, ...telahair.sentPackets].some((packet) =>
+            packet.id === 0x78 && parseHpDelta(packet.payload).delta > 0
+        ),
+        false,
+        'teammate death must not broadcast a positive boss-heal packet after committed death'
+    );
+
+    await waitForPendingTimers();
+    assert.equal(rankPacketCount(zeus), 0, 'completion plate must wait for the post-death cinematic');
+    assert.equal(rankPacketCount(telahair), 0, 'teammate completion plate must wait for the post-death cinematic');
+
+    await finishEastWingPostDeathCutscene(zeus, telahair);
+    const sharedState = GlobalState.levelQuestProgress.get(scope);
+    assert.equal(Boolean(sharedState?.completionFinalized), true, 'completion must finalize after the cinematic barrier');
+    assert.equal(rankPacketCount(zeus), 1, 'boss killer must receive one completion plate');
+    assert.equal(rankPacketCount(telahair), 1, 'dead teammate must receive one completion plate');
+}
+
 function testPlayerEntityIsolatedFromHostileHpReports(): void {
     const { zeus, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-player-isolation');
     const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
@@ -1689,6 +1745,12 @@ async function main(): Promise<void> {
         GlobalState.partyByMember.clear();
         GlobalState.partyGroups.clear();
         await testCanonicalHostileDeathIgnoresLatePositiveReports();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCommittedBossDeathIgnoresTeammateDeathRegen();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();

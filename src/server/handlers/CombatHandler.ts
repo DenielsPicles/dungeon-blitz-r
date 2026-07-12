@@ -1603,7 +1603,14 @@ export class CombatHandler {
 
     private static isHostileDefeatVerified(levelScope: string, entity: any): boolean {
         return CombatHandler.collectHostileHealthCopies(levelScope, entity, true)
-            .some((copy) => Boolean(copy?.clientDefeatVerified));
+            .some((copy) =>
+                Boolean(copy?.clientDefeatVerified) ||
+                Boolean(copy?.destroyed) ||
+                Boolean(copy?.bossDeathCommitted) ||
+                Boolean(copy?.bossRespawnBlocked) ||
+                Boolean(copy?.questDefeatProcessed) ||
+                CombatHandler.getHostileDeathFinalizedAt(copy) > 0
+            );
     }
 
     private static getDeadPlayerForHostileDeathRegen(levelScope: string, entity: any): Client | null {
@@ -2101,10 +2108,10 @@ export class CombatHandler {
             : null;
         const zeroHpOrDead = Boolean(healthState) &&
             (CombatHandler.isEntityDead(entity) || healthState!.currentHp <= 0);
-        const verifiedDefeat = deathRegenArmed &&
-            CombatHandler.isHostileDefeatVerified(levelScope, entity);
+        const verifiedDefeat = CombatHandler.isHostileDefeatVerified(levelScope, entity);
         if (
             !healthState ||
+            verifiedDefeat ||
             healthState.currentHp >= healthState.maxHp ||
             (zeroHpOrDead && (!deadDeathRegenPlayer || verifiedDefeat))
         ) {
@@ -2967,6 +2974,15 @@ export class CombatHandler {
                 Number(entity?.team ?? 0) !== EntityTeam.ENEMY ||
                 !CombatHandler.isDungeonBossEntity(levelScope, entity)
             ) {
+                continue;
+            }
+
+            if (CombatHandler.isHostileDefeatVerified(levelScope, entity)) {
+                CombatHandler.clearHostileDeathRegenArm(
+                    levelScope,
+                    entity,
+                    CombatHandler.getHostileDeathRegenArmKey(entity)
+                );
                 continue;
             }
 
