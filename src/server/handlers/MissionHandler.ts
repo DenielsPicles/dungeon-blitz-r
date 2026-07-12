@@ -2290,7 +2290,6 @@ export class MissionHandler {
     }
 
     private static getEastWingCompletionEligibleClients(source: Client, levelScope: string, roomId: number): Client[] {
-        const sourcePartyId = getPartyIdForClient(source);
         const clients: Client[] = [];
         for (const other of GlobalState.sessionsByToken.values()) {
             if (
@@ -2298,9 +2297,6 @@ export class MissionHandler {
                 !other.character ||
                 getClientLevelScope(other) !== levelScope
             ) {
-                continue;
-            }
-            if (sourcePartyId > 0 && other !== source && !areClientsInSameParty(source, other)) {
                 continue;
             }
             if (roomId > 0) {

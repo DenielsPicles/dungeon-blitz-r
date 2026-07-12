@@ -3488,6 +3488,16 @@ export class LevelHandler {
         );
     }
 
+    private static shouldHoldEastWingPostDeathClose(client: Client, roomId: number): boolean {
+        const levelScope = getClientLevelScope(client);
+        return Boolean(
+            levelScope &&
+            roomId > 0 &&
+            LevelHandler.shouldEagerShareEastWingBossIntro(client.currentLevel) &&
+            LevelHandler.isEastWingPostDeathContext(levelScope)
+        );
+    }
+
     private static trackEastWingIntroClient(client: Client, roomId: number): void {
         const levelScope = getClientLevelScope(client);
         if (!LevelHandler.isEastWingIntroCutsceneActive(levelScope, roomId)) {
@@ -3928,6 +3938,37 @@ export class LevelHandler {
                 currentStep: Math.max(0, Math.round(Number(joinedAtDialogIndex) || 0))
             });
         }
+    }
+
+    static startEastWingPostDeathCutsceneForClient(client: Client, roomId: number): boolean {
+        const levelName = LevelConfig.normalizeLevelName(client.currentLevel);
+        const levelScope = getClientLevelScope(client);
+        const normalizedRoomId = Math.max(0, Math.round(Number(roomId) || 0));
+        if (
+            !levelName ||
+            !levelScope ||
+            normalizedRoomId <= 0 ||
+            !LevelHandler.shouldEagerShareEastWingBossIntro(levelName)
+        ) {
+            return false;
+        }
+
+        const bb = new BitBuffer(false);
+        bb.writeMethod9(normalizedRoomId);
+        bb.writeMethod15(false);
+        const payload = bb.toBuffer();
+        const key = LevelHandler.getSharedDungeonCutsceneKey(levelScope, normalizedRoomId);
+        const existing = GlobalState.dungeonCutscenes.get(key);
+        if (!existing?.active || existing.completed) {
+            LevelHandler.setSharedDungeonCutsceneActive(levelScope, normalizedRoomId, client.token);
+        }
+
+        LevelHandler.sendSharedDungeonCutsceneStartToClient(client, normalizedRoomId, payload, 0, true);
+        LevelHandler.setServerAuthorityHostilesUntargetableForScope(levelScope, normalizedRoomId, true);
+        LevelHandler.logEastWingState('eastwing-postdeath-cutscene-packet-send', client, normalizedRoomId, {
+            packetTypes: '0xA5'
+        });
+        return true;
     }
 
     private static getSharedDungeonCutsceneParticipants(
@@ -5371,6 +5412,12 @@ export class LevelHandler {
             return;
         }
         if (sharedCutsceneDecision === 'finished') {
+            if (LevelHandler.shouldHoldEastWingPostDeathClose(client, roomId)) {
+                MissionHandler.noteDungeonCutsceneEnd(client, roomId);
+                client.activeDungeonCutsceneJoinedAtDialogIndex = 0;
+                client.activeDungeonCutsceneLocalDialogIndex = 0;
+                return;
+            }
             LevelHandler.sendSharedDungeonCutsceneEndToParticipants(client, roomId, data);
             LevelHandler.setServerAuthorityHostilesUntargetableForScope(getClientLevelScope(client), roomId, false);
             return;

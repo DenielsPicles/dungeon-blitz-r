@@ -167,6 +167,23 @@ function buildPowerCastPayload(sourceId: number, powerId: number = 77): Buffer {
     return bb.toBuffer();
 }
 
+function buildHpReportPayload(entityId: number, amount: number): Buffer {
+    const bb = new BitBuffer(false);
+    bb.writeMethod4(entityId);
+    bb.writeMethod24(amount);
+    return bb.toBuffer();
+}
+
+function buildBuffTickDotPayload(targetId: number, sourceId: number, damage: number, powerId: number = 77): Buffer {
+    const bb = new BitBuffer(false);
+    bb.writeMethod4(targetId);
+    bb.writeMethod4(sourceId);
+    bb.writeMethod4(powerId);
+    bb.writeMethod45(-Math.abs(damage));
+    bb.writeMethod20(0, 5);
+    return bb.toBuffer();
+}
+
 function buildClientHostileFullUpdate(
     entityId: number,
     name: string,
@@ -269,6 +286,15 @@ function parseHpDelta(payload: Buffer): { entityId: number; delta: number } {
         entityId: br.readMethod4(),
         delta: br.readMethod45()
     };
+}
+
+function applyHpPackets(startingHp: number, maxHp: number, client: FakeClient, entityId: number): number {
+    return client.sentPackets
+        .filter((packet) => packet.id === 0x78 && parseHpDelta(packet.payload).entityId === entityId)
+        .reduce((hp, packet) => {
+            const { delta } = parseHpDelta(packet.payload);
+            return Math.max(0, Math.min(maxHp, hp + delta));
+        }, startingHp);
 }
 
 function parseDestroy(payload: Buffer): { entityId: number; immediate: boolean } {
@@ -803,6 +829,8 @@ async function testCompletionWaitsForSharedPostDeathCutsceneBarrier(): Promise<v
     assert.equal(Boolean(tanja.bossDeathCommitted), true, 'boss death should be committed once');
     assert.equal(Boolean(sharedState?.postDeathCutsceneStarted), true, 'shared post-death cutscene should be started/gated');
     assert.equal(Boolean(sharedState?.postDeathCutsceneFinished), false, 'post-death cutscene should still be open');
+    assert.equal(zeus.sentPackets.some((packet) => packet.id === 0xA5), true, 'killer must receive post-death cutscene start on boss death');
+    assert.equal(telahair.sentPackets.some((packet) => packet.id === 0xA5), true, 'party member must receive post-death cutscene start on boss death');
     assert.equal(rankPacketCount(zeus), 0, 'killer must not get rank UI on boss death');
     assert.equal(rankPacketCount(telahair), 0, 'party owner must not get rank UI on boss death');
 
@@ -1379,6 +1407,191 @@ async function testBossDeathDuringIntroForcesCutsceneEnd(): Promise<void> {
     );
 }
 
+async function testCanonicalHostileHpRejectsStaleClientReports(): Promise<void> {
+    const { zeus, telahair, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-stale');
+    attachProxy(zeus, 540004, 'TowerGuard2', 11978, 4756, 3);
+    attachProxy(telahair, 640004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    await CombatHandler.handlePowerHit(zeus as never, buildPowerHitPayload(540004, zeus.clientEntID, 7143));
+    const canonicalAfterHit = Math.round(Number(tanja.hp ?? 0));
+    assert.ok(canonicalAfterHit > 0 && canonicalAfterHit < Math.round(Number(tanja.maxHp ?? 0)), 'valid hit must reduce canonical HP');
+
+    telahair.entities.set(640004, {
+        ...telahair.entities.get(640004),
+        hp: Math.round(Number(tanja.maxHp ?? 0)),
+        maxHp: Math.round(Number(tanja.maxHp ?? 0))
+    });
+    const hpVersionAfterHit = Math.max(0, Math.round(Number(tanja.hpVersion ?? 0)));
+    telahair.sentPackets.length = 0;
+    CombatHandler.handleCharRegen(telahair as never, buildHpReportPayload(640004, 7143));
+
+    assert.equal(Math.round(Number(tanja.hp ?? 0)), canonicalAfterHit, 'stale client HP report must not heal canonical Tanja');
+    assert.equal(Math.max(0, Math.round(Number(tanja.hpVersion ?? 0))), hpVersionAfterHit, 'client HP report must not increment hpVersion');
+    assert.equal(
+        telahair.sentPackets.some((packet) => packet.id === 0x78 && parseHpDelta(packet.payload).entityId === 640004 && parseHpDelta(packet.payload).delta < 0),
+        true,
+        'reporting client should receive a local-id correction back to canonical HP'
+    );
+    assert.equal(telahair.entities.get(640004)?.hp, canonicalAfterHit, 'reporting client cache must converge to canonical HP');
+}
+
+async function testCanonicalHostileHpRejectsConflictingClients(): Promise<void> {
+    const { zeus, telahair, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-conflict');
+    attachProxy(zeus, 550004, 'TowerGuard2', 11978, 4756, 3);
+    attachProxy(telahair, 650004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+    tanja.maxHp = 403680;
+    tanja.hp = 300000;
+    tanja.healthDelta = tanja.hp - tanja.maxHp;
+    tanja.health_delta = tanja.healthDelta;
+
+    zeus.entities.set(550004, { ...zeus.entities.get(550004), hp: 320000, maxHp: 403680 });
+    telahair.entities.set(650004, { ...telahair.entities.get(650004), hp: 280000, maxHp: 403680 });
+    CombatHandler.handleCharRegen(zeus as never, buildHpReportPayload(550004, 20000));
+    CombatHandler.handleCharRegen(telahair as never, buildHpReportPayload(650004, -20000));
+
+    assert.equal(tanja.hp, 300000, 'conflicting client reports must not move canonical HP');
+    assert.equal(zeus.entities.get(550004)?.hp, 300000, 'high stale reporter should be corrected downward');
+    assert.equal(telahair.entities.get(650004)?.hp, 300000, 'low stale reporter should be corrected upward');
+}
+
+async function testCanonicalHostileHpBroadcastIsAbsoluteForEveryViewer(): Promise<void> {
+    const { zeus, telahair, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-absolute');
+    attachProxy(zeus, 555004, 'TowerGuard2', 11978, 4756, 3);
+    attachProxy(telahair, 655004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+
+    const maxHp = 403680;
+    tanja.maxHp = maxHp;
+    tanja.hp = 300000;
+    tanja.healthDelta = tanja.hp - maxHp;
+    tanja.health_delta = tanja.healthDelta;
+    zeus.entities.set(555004, { ...zeus.entities.get(555004), hp: 340000, maxHp });
+    telahair.entities.set(655004, { ...telahair.entities.get(655004), hp: 250000, maxHp });
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    zeus.sentPackets.length = 0;
+    telahair.sentPackets.length = 0;
+    await CombatHandler.handlePowerHit(zeus as never, buildPowerHitPayload(555004, zeus.clientEntID, 5000));
+
+    const canonicalHp = Math.round(Number(tanja.hp ?? 0));
+    const sourceRenderedHp = applyHpPackets(335000, maxHp, zeus, 555004);
+    const viewerRenderedHp = applyHpPackets(245000, maxHp, telahair, 655004);
+    assert.equal(sourceRenderedHp, canonicalHp, 'attacker must finish the hit at canonical boss HP');
+    assert.equal(viewerRenderedHp, canonicalHp, 'party viewer must finish the hit at canonical boss HP');
+
+    for (const [viewer, localId] of [[zeus, 555004], [telahair, 655004]] as const) {
+        const deltas = viewer.sentPackets
+            .filter((packet) => packet.id === 0x78 && parseHpDelta(packet.payload).entityId === localId)
+            .map((packet) => parseHpDelta(packet.payload).delta);
+        assert.deepEqual(
+            deltas.slice(-2),
+            [maxHp, -(maxHp - canonicalHp)],
+            'final HP packets must reset each local boss proxy to the same absolute canonical value'
+        );
+        assert.equal(viewer.entities.get(localId)?.hp, canonicalHp, 'server viewer cache must match canonical boss HP');
+    }
+}
+
+async function testCanonicalHostileDamageEventsAreIdempotent(): Promise<void> {
+    const { zeus, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-duplicate');
+    attachProxy(zeus, 560004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+    const hpBefore = Math.round(Number(tanja.hp ?? 0));
+    const versionBefore = Math.max(0, Math.round(Number(tanja.hpVersion ?? 0)));
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    const payload = buildPowerHitPayload(560004, zeus.clientEntID, 5000);
+    await CombatHandler.handlePowerHit(zeus as never, payload);
+    await CombatHandler.handlePowerHit(zeus as never, payload);
+
+    assert.equal(Math.round(Number(tanja.hp ?? 0)), hpBefore - 5000, 'duplicate hit packet must apply damage once');
+    assert.equal(Math.max(0, Math.round(Number(tanja.hpVersion ?? 0))), versionBefore + 1, 'duplicate hit packet must increment hpVersion once');
+}
+
+async function testCanonicalHostileDirectHitAndDotUseSeparateEvents(): Promise<void> {
+    const { zeus, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-dot');
+    attachProxy(zeus, 570004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+    const hpBefore = Math.round(Number(tanja.hp ?? 0));
+    const versionBefore = Math.max(0, Math.round(Number(tanja.hpVersion ?? 0)));
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    await CombatHandler.handlePowerHit(zeus as never, buildPowerHitPayload(570004, zeus.clientEntID, 1000));
+    await CombatHandler.handleBuffTickDot(zeus as never, buildBuffTickDotPayload(570004, zeus.clientEntID, 500));
+
+    assert.equal(Math.round(Number(tanja.hp ?? 0)), hpBefore - 1500, 'direct hit and DoT tick must both apply once');
+    assert.equal(Math.max(0, Math.round(Number(tanja.hpVersion ?? 0))), versionBefore + 2, 'direct hit and DoT tick must each increment hpVersion');
+}
+
+async function testCanonicalHostileLateJoinReceivesCurrentHp(): Promise<void> {
+    const { zeus, telahair, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-late');
+    attachProxy(zeus, 580004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    await CombatHandler.handlePowerHit(zeus as never, buildPowerHitPayload(580004, zeus.clientEntID, 2500));
+    const canonicalHp = Math.round(Number(tanja.hp ?? 0));
+
+    const late = createFakeClient('AlexMercer', 'JC_Mini2', zeus.levelInstanceId, 77778, 3);
+    setParty(zeus, telahair, late);
+    attachPlayer(late);
+    GlobalState.sessionsByToken.set(late.token, late as never);
+    EntityHandler.sendInitialLevelEntities(late as never, late.currentLevel);
+    late.sentPackets.length = 0;
+    attachProxy(late, 780004, 'TowerGuard2', 11978, 4756, 3);
+
+    assert.equal(late.entities.get(780004)?.hp, canonicalHp, 'late joiner proxy cache must receive current canonical HP');
+    assert.equal(Math.round(Number(tanja.hp ?? 0)), canonicalHp, 'late joiner full-health local spawn must not reset canonical HP');
+    assert.equal(zeus.entities.get(580004)?.hp, canonicalHp, 'existing player must remain at canonical HP after late join');
+}
+
+async function testCanonicalHostileDeathIgnoresLatePositiveReports(): Promise<void> {
+    const { zeus, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-death');
+    attachProxy(zeus, 590004, 'TowerGuard2', 11978, 4756, 3);
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+
+    await CombatHandler.handlePowerCast(zeus as never, buildPowerCastPayload(zeus.clientEntID));
+    await CombatHandler.handlePowerHit(zeus as never, buildPowerHitPayload(590004, zeus.clientEntID, Math.round(Number(tanja.hp ?? 0)) + 1));
+    assert.equal(tanja.hp, 0, 'lethal valid damage must set canonical HP to zero');
+    assert.equal(tanja.dead, true, 'lethal valid damage must mark canonical dead');
+    const deathVersion = Math.max(0, Math.round(Number(tanja.deathVersion ?? 0)));
+
+    zeus.entities.set(590004, {
+        ...zeus.entities.get(590004),
+        hp: Math.round(Number(tanja.maxHp ?? 1)),
+        maxHp: Math.round(Number(tanja.maxHp ?? 1)),
+        dead: false,
+        entState: EntityState.ACTIVE
+    });
+    CombatHandler.handleCharRegen(zeus as never, buildHpReportPayload(590004, Math.round(Number(tanja.maxHp ?? 1))));
+    assert.equal(tanja.hp, 0, 'late positive client report must not revive canonical Tanja');
+    assert.equal(tanja.dead, true, 'late positive client report must not clear canonical death');
+    assert.equal(Math.max(0, Math.round(Number(tanja.deathVersion ?? 0))), deathVersion, 'late positive report must not recommit death');
+}
+
+function testPlayerEntityIsolatedFromHostileHpReports(): void {
+    const { zeus, scope } = setupTwoPlayersInBossRoom('JC_Mini2', 'jc-mini2-hp-authority-player-isolation');
+    const tanja = GlobalState.levelEntities.get(scope)?.get(TANJA_CANONICAL_ID);
+    assert.ok(tanja, 'canonical Tanja should exist');
+    const tanjaHp = Math.round(Number(tanja.hp ?? 0));
+    const playerHpBefore = zeus.authoritativeCurrentHp;
+
+    CombatHandler.handleCharRegen(zeus as never, buildHpReportPayload(zeus.clientEntID, -1200));
+
+    assert.equal(Math.round(Number(tanja.hp ?? 0)), tanjaHp, 'player HP packet must not enter hostile canonical HP reconciliation');
+    assert.equal(zeus.authoritativeCurrentHp, playerHpBefore - 1200, 'player HP packet should stay on the player health path');
+}
+
 async function main(): Promise<void> {
     const levelEntities = new Map(GlobalState.levelEntities);
     const sessionsByToken = new Map(GlobalState.sessionsByToken);
@@ -1428,6 +1641,60 @@ async function main(): Promise<void> {
         GlobalState.partyByMember.clear();
         GlobalState.partyGroups.clear();
         await testEastWingCompletionReachesDistantPartyMember();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCompletionWaitsForSharedPostDeathCutsceneBarrier();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCanonicalHostileHpRejectsStaleClientReports();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCanonicalHostileHpRejectsConflictingClients();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCanonicalHostileHpBroadcastIsAbsoluteForEveryViewer();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCanonicalHostileDamageEventsAreIdempotent();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCanonicalHostileDirectHitAndDotUseSeparateEvents();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCanonicalHostileLateJoinReceivesCurrentHp();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testCanonicalHostileDeathIgnoresLatePositiveReports();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        testPlayerEntityIsolatedFromHostileHpReports();
 
         console.log('jc_mini2_server_authority_regression: ok');
     } finally {

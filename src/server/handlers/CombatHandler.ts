@@ -117,6 +117,8 @@ type HostileViewerHealthSnapshot = {
     previousMaxHp: number;
 };
 
+type CanonicalHostileDamageResult = 'accepted' | 'duplicate' | 'alreadyDead' | 'invalid';
+
 export class CombatHandler {
     private static readonly MAX_RELAY_POWER_HIT_DAMAGE = 4_000_000;
     private static readonly FIREBRAND_THIRD_SHOT_POWER_ID = 6144;
@@ -149,6 +151,7 @@ export class CombatHandler {
     private static readonly EAST_WING_DAMAGE_CAST_WINDOW_MS = 2_500;
     private static readonly EAST_WING_HEALTH_RECONCILE_LOG_THROTTLE_MS = 10_000;
     private static readonly recentEastWingPlayerCasts = new Map<string, number>();
+    private static readonly eastWingPlayerCastSequences = new Map<string, number>();
     private static readonly recentEastWingHealthReconcileLogs = new Map<string, number>();
     private static clampRelayPowerHitDamage(damage: number): number {
         return Math.max(0, Math.min(CombatHandler.MAX_RELAY_POWER_HIT_DAMAGE, Math.round(Number(damage) || 0)));
@@ -773,6 +776,62 @@ export class CombatHandler {
 
         entity.hpVersion = Math.max(0, Math.round(Number(entity.hpVersion ?? 0))) + 1;
         return entity.hpVersion;
+    }
+
+    private static getCanonicalHostileDamageEventSet(entity: any): Set<string> {
+        if (!entity || typeof entity !== 'object') {
+            return new Set<string>();
+        }
+        if (entity.processedDamageEventIds instanceof Set) {
+            return entity.processedDamageEventIds;
+        }
+        entity.processedDamageEventIds = new Set<string>(
+            Array.isArray(entity.processedDamageEventIds)
+                ? entity.processedDamageEventIds.map((value: unknown) => String(value))
+                : []
+        );
+        return entity.processedDamageEventIds;
+    }
+
+    private static noteCanonicalHostileDamageEvent(
+        levelScope: string,
+        entity: any,
+        eventId: string,
+        source: string,
+        attackerId: number,
+        before: number,
+        damage: number,
+        after: number,
+        hpVersionBefore: number,
+        hpVersionAfter: number
+    ): CanonicalHostileDamageResult {
+        if (!levelScope || !entity || typeof entity !== 'object') {
+            return 'invalid';
+        }
+
+        const canonicalId = Math.max(0, Math.round(Number(entity.id ?? 0)));
+        const normalizedEventId = String(eventId ?? '').trim();
+        if (canonicalId <= 0 || !normalizedEventId) {
+            return 'invalid';
+        }
+        if (CombatHandler.isCanonicalHostileTerminal(levelScope, entity)) {
+            return 'alreadyDead';
+        }
+
+        const processed = CombatHandler.getCanonicalHostileDamageEventSet(entity);
+        if (processed.has(normalizedEventId)) {
+            console.warn(
+                `[HostileHpAuthority][damage-duplicate] scope=${levelScope} canonicalId=${canonicalId} eventId=${normalizedEventId} source=${source}`
+            );
+            return 'duplicate';
+        }
+
+        processed.add(normalizedEventId);
+        entity.lastMutationAt = Date.now();
+        console.log(
+            `[HostileHpAuthority][damage-accepted] scope=${levelScope} canonicalId=${canonicalId} eventId=${normalizedEventId} source=${source} attackerId=${Math.max(0, Math.round(Number(attackerId) || 0))} before=${before} damage=${damage} after=${after} hpVersionBefore=${hpVersionBefore} hpVersionAfter=${hpVersionAfter}`
+        );
+        return 'accepted';
     }
 
     private static isCanonicalHostileTerminal(levelScope: string, entity: any): boolean {
@@ -2161,6 +2220,9 @@ export class CombatHandler {
         );
         CombatHandler.syncHostileHealthCopies(levelScope, entity, nextHp, healthState.maxHp);
 
+        if (isEastWingRequiredEnemy(levelScope, entity)) {
+            CombatHandler.incrementHostileHpVersion(entity);
+        }
         const payload = CombatHandler.buildCharRegenPayload(Number(entity.id ?? 0), actualHeal);
         const viewers = CombatHandler.broadcastHostileRegenPacket(levelScope, entity, payload);
         CombatHandler.logBossRegen('boss-regen-heal', levelScope, entity, {
@@ -2183,6 +2245,10 @@ export class CombatHandler {
             return 0;
         }
 
+        const canonicalAuthority = isEastWingRequiredEnemy(levelScope, entity) &&
+            CombatHandler.isServerAuthoritySyncNpc(levelScope, entity);
+        const hpVersion = Math.max(0, Math.round(Number(entity?.hpVersion ?? 0)));
+
         let viewers = 0;
         const sourceRoomId = Number.isFinite(Number(entity?.roomId)) ? Number(entity.roomId) : -1;
         for (const viewer of GlobalState.sessionsByToken.values()) {
@@ -2200,6 +2266,25 @@ export class CombatHandler {
                 viewer.entities.has(entityId) ||
                 viewer.knownEntityIds.has(entityId);
             if (!canResolveEntity) {
+                continue;
+            }
+
+            if (canonicalAuthority) {
+                const resolved = EntityHandler.resolveHostileLocalIdForViewer(viewer, levelScope, entityId, 'boss-regen');
+                if (
+                    resolved.ok &&
+                    resolved.localId > 0 &&
+                    CombatHandler.sendAuthoritativeServerAuthorityHpToViewer(
+                        viewer,
+                        levelScope,
+                        entity,
+                        resolved.localId,
+                        'boss-regen',
+                        hpVersion
+                    )
+                ) {
+                    viewers++;
+                }
                 continue;
             }
 
@@ -2353,9 +2438,11 @@ export class CombatHandler {
             return;
         }
 
-        CombatHandler.recentEastWingPlayerCasts.set(
-            CombatHandler.getEastWingCastKey(levelScope, sourceId, powerId),
-            Date.now()
+        const castKey = CombatHandler.getEastWingCastKey(levelScope, sourceId, powerId);
+        CombatHandler.recentEastWingPlayerCasts.set(castKey, Date.now());
+        CombatHandler.eastWingPlayerCastSequences.set(
+            castKey,
+            Math.max(0, Math.round(Number(CombatHandler.eastWingPlayerCastSequences.get(castKey) ?? 0))) + 1
         );
     }
 
@@ -2373,6 +2460,34 @@ export class CombatHandler {
         }
 
         return true;
+    }
+
+    private static getEastWingPlayerCastSequence(levelScope: string, sourceId: number, powerId: number): number {
+        return Math.max(
+            0,
+            Math.round(Number(CombatHandler.eastWingPlayerCastSequences.get(
+                CombatHandler.getEastWingCastKey(levelScope, sourceId, powerId)
+            ) ?? 0))
+        );
+    }
+
+    private static buildCanonicalHostileDamageEventId(
+        levelScope: string,
+        canonicalTargetId: number,
+        sourceId: number,
+        powerId: number,
+        sourcePath: string,
+        damage: number
+    ): string {
+        return [
+            String(levelScope ?? '').trim(),
+            Math.max(0, Math.round(Number(sourceId) || 0)),
+            Math.max(0, Math.round(Number(canonicalTargetId) || 0)),
+            Math.max(0, Math.round(Number(powerId) || 0)),
+            Math.max(0, CombatHandler.getEastWingPlayerCastSequence(levelScope, sourceId, powerId)),
+            String(sourcePath ?? '').trim() || 'combat',
+            Math.max(0, Math.round(Number(damage) || 0))
+        ].join(':');
     }
 
     private static buildEastWingDamageContext(
@@ -2395,19 +2510,20 @@ export class CombatHandler {
             return null;
         }
 
+        const canonicalTargetId = Math.max(0, Math.round(Number(targetEntity?.id ?? 0)));
         return {
             cause: 'combat_damage',
             attackerId: sourceId,
             playerId: sourceSession.userId || sourceSession.token || sourceSession.clientEntID,
             skillId: powerId,
-            damageEventId: [
+            damageEventId: CombatHandler.buildCanonicalHostileDamageEventId(
                 levelScope,
-                Math.max(0, Math.round(Number(targetEntity?.id ?? 0))),
+                canonicalTargetId,
                 sourceId,
                 powerId,
-                Math.max(0, Math.round(Number(damage) || 0)),
-                Date.now()
-            ].join(':'),
+                sourcePath,
+                damage
+            ),
             damageAmount: damage,
             hpBefore,
             hpAfter,
@@ -3430,6 +3546,9 @@ export class CombatHandler {
                 deathVersion: Math.max(0, Math.round(Number(entity.deathVersion ?? 0))),
                 viewers
             });
+            console.log(
+                `[HostileHpAuthority][death-commit] scope=${levelScope} canonicalId=${entityId} killerId=${Math.max(0, Math.round(Number(anchor?.clientEntID ?? 0)))} hpVersion=${Math.max(0, Math.round(Number(entity.hpVersion ?? 0)))} deathVersion=${Math.max(0, Math.round(Number(entity.deathVersion ?? 0)))} lootTriggered=${Boolean(entity.lootDropped)} progressTriggered=${Boolean(entity.questDefeatProcessed)}`
+            );
 
             CombatHandler.handleCanonicalVisibleServerAuthorityDefeatSideEffects(anchor, levelScope, entity);
         }
@@ -4280,19 +4399,29 @@ export class CombatHandler {
         const canonicalHp = Math.max(0, Math.round(Number(entity?.hp ?? 0)));
         const maxHp = Math.max(1, Math.round(Number(entity?.maxHp ?? 0)) || EntityHandler.estimateServerAuthorityHostileMaxHp(entity) || 1);
         const existing = viewer.entities.get(localId) ?? viewer.entities.get(canonicalId);
-        const previousHpRaw = Number(existing?.hp ?? NaN);
-        const previousHp = Number.isFinite(previousHpRaw)
-            ? Math.max(0, Math.round(previousHpRaw))
-            : maxHp;
-        // On the death frame a cache-based delta can leave a sliver of HP on
-        // the viewer's locally simulated copy; floor it so every screen hits
-        // zero simultaneously (clients clamp HP at zero).
-        const delta = canonicalHp <= 0
-            ? -Math.max(previousHp, maxHp)
-            : canonicalHp - previousHp;
-
-        EntityHandler.logAliasOutbound(CombatHandler.packetLabel(0x78), viewer, canonicalId, localId);
-        viewer.send(0x78, CombatHandler.buildHpDeltaPayload(localId, delta));
+        const damageTaken = Math.max(0, maxHp - canonicalHp);
+        const usesAbsoluteEastWingSync = isEastWingRequiredEnemy(levelScope, entity);
+        if (usesAbsoluteEastWingSync) {
+            // Flash simulates combat locally, so the server cannot reliably
+            // know the HP rendered by each viewer. Heal-to-cap followed by
+            // canonical damage is an absolute assignment from any start HP.
+            EntityHandler.logAliasOutbound(CombatHandler.packetLabel(0x78), viewer, canonicalId, localId);
+            viewer.send(0x78, CombatHandler.buildHpDeltaPayload(localId, maxHp));
+            if (damageTaken > 0) {
+                EntityHandler.logAliasOutbound(CombatHandler.packetLabel(0x78), viewer, canonicalId, localId);
+                viewer.send(0x78, CombatHandler.buildHpDeltaPayload(localId, -damageTaken));
+            }
+        } else {
+            const previousHpRaw = Number(existing?.hp ?? NaN);
+            const previousHp = Number.isFinite(previousHpRaw)
+                ? Math.max(0, Math.round(previousHpRaw))
+                : maxHp;
+            const delta = canonicalHp <= 0
+                ? -Math.max(previousHp, maxHp)
+                : canonicalHp - previousHp;
+            EntityHandler.logAliasOutbound(CombatHandler.packetLabel(0x78), viewer, canonicalId, localId);
+            viewer.send(0x78, CombatHandler.buildHpDeltaPayload(localId, delta));
+        }
         viewer.entities.set(localId, {
             ...(existing ?? {}),
             ...entity,
@@ -4317,6 +4446,9 @@ export class CombatHandler {
             source: reason,
             hpVersion
         });
+        console.log(
+            `[HostileHpAuthority][broadcast] scope=${levelScope} canonicalId=${canonicalId} viewer=${String(viewer.character?.name ?? '').replace(/\s+/g, '_')} localId=${localId} hp=${canonicalHp} maxHp=${maxHp} mode=${usesAbsoluteEastWingSync ? 'absolute' : 'relative'} resetPositive=${usesAbsoluteEastWingSync ? maxHp : 0} resetNegative=${usesAbsoluteEastWingSync ? -damageTaken : 0} hpVersion=${hpVersion} dead=${Boolean(entity?.dead)} deathVersion=${Math.max(0, Math.round(Number(entity?.deathVersion ?? 0)))}`
+        );
         return true;
     }
 
@@ -4962,6 +5094,20 @@ export class CombatHandler {
             console.log(
                 `[EastWingDeathAccepted] cause=combat_damage rewardSpawned=${Boolean(entity.lootDropped)} progressCounted=${Boolean(entity.questDefeatProcessed)} entityId=${entityId} eventId=${String(entity.combatDeathEventId ?? '')}`
             );
+        }
+        if (isEastWingRequiredEnemy(levelScope, entity) && Boolean(entity?.roomBoss ?? entity?.isRoomBoss)) {
+            const postDeathRoomId = Math.max(0, Math.round(Number(entity?.roomBossRoomId ?? entity?.roomId ?? 0)));
+            if (postDeathRoomId > 0) {
+                for (const viewer of GlobalState.sessionsByToken.values()) {
+                    if (
+                        !CombatHandler.canReceiveServerAuthorityNpcRelay(anchor, viewer, levelScope) ||
+                        !sharesRoomIds(viewer.currentRoomId, postDeathRoomId)
+                    ) {
+                        continue;
+                    }
+                    LevelHandler.startEastWingPostDeathCutsceneForClient(viewer, postDeathRoomId);
+                }
+            }
         }
         entity.level = EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL;
         entity.maxHp = maxHp;
@@ -5920,6 +6066,32 @@ export class CombatHandler {
             };
         }
 
+        const isCanonicalServerAuthorityHostile = EntityHandler.isServerAuthorityHostileEntity(levelName, entity);
+        const damageEventId = String(deathContext?.damageEventId ?? '').trim();
+        const hpVersionBefore = Math.max(0, Math.round(Number(entity.hpVersion ?? 0)));
+        if (isCanonicalServerAuthorityHostile && appliedDamage > 0 && damageEventId) {
+            const damageResult = CombatHandler.noteCanonicalHostileDamageEvent(
+                levelName,
+                entity,
+                damageEventId,
+                deathContext?.sourcePath ?? 'CombatHandler.updateNpcTargetAfterHit',
+                attackerId,
+                healthState.currentHp,
+                appliedDamage,
+                nextHp,
+                hpVersionBefore,
+                hpVersionBefore + 1
+            );
+            if (damageResult !== 'accepted') {
+                return {
+                    entity,
+                    entityId: Math.max(0, Math.round(Number(entity.id ?? targetId))),
+                    appliedDamage: 0,
+                    killed: damageResult === 'alreadyDead'
+                };
+            }
+        }
+
         CombatHandler.applyNpcHealthState(entity, healthState.maxHp, nextHp, authoritativeKill, deathContext);
         if (appliedDamage > 0) {
             CombatHandler.incrementHostileHpVersion(entity);
@@ -6674,7 +6846,10 @@ export class CombatHandler {
                     -Math.max(0, Math.round(Number(resolution.appliedDamage ?? 0))),
                     Math.max(0, Math.round(Number(resolution.entity.hp ?? 0)))
                 );
-                if (CombatHandler.isServerAuthoritySyncNpc(levelScope, resolution.entity)) {
+                if (
+                    CombatHandler.isServerAuthoritySyncNpc(levelScope, resolution.entity) &&
+                    !isEastWingRequiredEnemy(levelScope, resolution.entity)
+                ) {
                     CombatHandler.broadcastAuthoritativeServerAuthorityHp(
                         sourceSession ?? client,
                         levelScope,
@@ -6769,6 +6944,14 @@ export class CombatHandler {
                 sourceId,
                 serverAuthorityNpcSnapshots
             );
+            if (isEastWingRequiredEnemy(levelScope, serverAuthorityNpcResolution.entity)) {
+                CombatHandler.broadcastAuthoritativeServerAuthorityHp(
+                    sourceSession ?? client,
+                    levelScope,
+                    serverAuthorityNpcResolution.entity,
+                    'powerhit-final'
+                );
+            }
             if (serverAuthorityNpcResolution.killed) {
                 CombatHandler.relayServerAuthorityNpcDeath(client, levelScope, serverAuthorityNpcResolution.entity);
             }
@@ -7318,6 +7501,9 @@ export class CombatHandler {
             if (CombatHandler.isServerAuthoritySyncNpc(levelScope, targetEntity)) {
                 const canonicalId = Math.max(0, Math.round(Number(targetEntity.id ?? entityId)));
                 if (CombatHandler.isTerminalHostileEntity(targetEntity)) {
+                    console.warn(
+                        `[HostileHpAuthority][late-report-after-death] scope=${levelScope} canonicalId=${canonicalId} viewer=${String(client.character?.name ?? '').replace(/\s+/g, '_')} clientHp=${Math.max(0, Math.round(Number((client.entities.get(rawEntityId) ?? client.entities.get(entityId))?.hp ?? 0)))} deathVersion=${Math.max(0, Math.round(Number(targetEntity.deathVersion ?? 0)))} action=ignored`
+                    );
                     CombatHandler.logPostDeathDrop('hp-report', client, levelScope, canonicalId, targetEntity, {
                         rawEntityId,
                         amount
@@ -7338,6 +7524,15 @@ export class CombatHandler {
                 EntityHandler.normalizeServerAuthorityHostileState(levelScope, targetEntity);
                 const currentHp = Math.max(0, Math.round(Number(targetEntity.hp ?? 0)));
                 CombatHandler.logHpMutation('hp-report', client, levelScope, canonicalId, currentHp, 0, currentHp);
+                const reportedLocal = client.entities.get(rawEntityId) ?? client.entities.get(entityId) ?? null;
+                const reportedHpRaw = Number(reportedLocal?.hp ?? NaN);
+                const reportedHp = Number.isFinite(reportedHpRaw)
+                    ? Math.max(0, Math.round(reportedHpRaw))
+                    : Math.max(0, currentHp + Math.round(Number(amount) || 0));
+                const canonicalVersion = Math.max(0, Math.round(Number(targetEntity.hpVersion ?? 0)));
+                console.warn(
+                    `[HostileHpAuthority][client-report-rejected] scope=${levelScope} canonicalId=${canonicalId} viewer=${String(client.character?.name ?? '').replace(/\s+/g, '_')} localId=${Math.max(0, Math.round(Number(rawEntityId) || 0))} clientHp=${reportedHp} canonicalHp=${currentHp} clientVersion=${canonicalVersion} canonicalVersion=${canonicalVersion} reason=client_absolute_hp_not_authoritative`
+                );
 
                 logJcMini1Authority('client_hostile_hp_report', {
                     rawEntityId,
@@ -7354,21 +7549,13 @@ export class CombatHandler {
                     ignoredForAuthority: true
                 });
                 if (!CombatHandler.isCanonicalHostileTerminal(levelScope, targetEntity)) {
-                    const viewers = CombatHandler.broadcastAuthoritativeServerAuthorityHp(
+                    CombatHandler.correctServerAuthorityHostileProxy(
                         client,
                         levelScope,
                         targetEntity,
-                        'client_hostile_hp_report'
+                        'client_hostile_hp_report',
+                        rawEntityId
                     );
-                    if (Math.round(Number(targetEntity.hp ?? 0)) <= CombatHandler.DEATH_EPSILON_HP || amount < 0) {
-                        CombatHandler.logMultiplayerSync('predicted-death-rejected-broadcast-alive', {
-                            canonicalId,
-                            hp: Math.round(Number(targetEntity.hp ?? 0)),
-                            sourceToken: client.token,
-                            viewers
-                        });
-                    }
-                    CombatHandler.sendServerAuthorityAliveCorrection(client, levelScope, targetEntity, 'client_hostile_hp_report', rawEntityId);
                 } else {
                     CombatHandler.logMultiplayerSync('alive-correction-converted-to-death', {
                         canonicalId,
@@ -7380,13 +7567,6 @@ export class CombatHandler {
                     CombatHandler.relayServerAuthorityNpcDeath(client, levelScope, targetEntity);
                     return true;
                 }
-                CombatHandler.convergeServerAuthorityNpcHealthToParty(
-                    client,
-                    levelScope,
-                    targetEntity,
-                    'client_hostile_hp_report',
-                    rawEntityId
-                );
                 return true;
             }
 
