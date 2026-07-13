@@ -111,32 +111,6 @@ export type DeadHostileTombstone = {
     deathVersion: number;
 };
 
-export type LostAtSeaSceneState = {
-    levelScope: string;
-    levelInstanceId: string;
-    phase: number;
-    phaseStartedAt: number;
-    phaseClearAt: number;
-    phaseVersion: number;
-    createdAt: number;
-    updatedAt: number;
-    partyId: number;
-    anchorToken: number;
-    anchorCharacterName: string;
-    phaseEntityIds: Record<string, number[]>;
-};
-
-export type LostAtSeaRunRegistryEntry = {
-    levelScope: string;
-    levelInstanceId: string;
-    partyId: number;
-    anchorToken: number;
-    anchorCharacterName: string;
-    memberKeys: Set<string>;
-    createdAt: number;
-    updatedAt: number;
-};
-
 export type PendingDiscordOAuthLogin = {
     account: UserAccount;
     remoteAddress: string;
@@ -191,9 +165,6 @@ export class GlobalState {
     static dungeonCutscenes: Map<string, SharedDungeonCutsceneState> = new Map();
     static dungeonSessions: Map<string, AuthoritativeDungeonSessionState> = new Map();
     static deadServerAuthorityHostilesByScope: Map<string, Map<string, DeadHostileTombstone>> = new Map();
-    static lostAtSeaScenes: Map<string, LostAtSeaSceneState> = new Map();
-    static lostAtSeaRunsByParty: Map<number, LostAtSeaRunRegistryEntry> = new Map();
-    static lostAtSeaRunsByMember: Map<string, LostAtSeaRunRegistryEntry> = new Map();
     static combatContributions: Map<string, Map<string, number>> = new Map();
     static entityLifeNonces: Map<string, number> = new Map();
     static entityLastRewardNonces: Map<string, number> = new Map();

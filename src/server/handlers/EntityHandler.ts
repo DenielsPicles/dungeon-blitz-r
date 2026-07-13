@@ -19,7 +19,6 @@ import { getPartyRuntimeLevelForClient } from '../core/RuntimeLevel';
 import { markRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import { isEastWingLevel, isEastWingRequiredEnemy, logEastWingEnemyMutation } from '../core/EastWingEnemyDebug';
-import { LostAtSeaScene } from '../core/LostAtSeaScene';
 import { DungeonSession } from '../core/DungeonSession';
 
 export class EntityHandler {
@@ -62,8 +61,7 @@ export class EntityHandler {
         'JC_Mini1Hard',
         'JC_Mini2',
         'JC_Mini2Hard',
-        'TutorialDungeon',
-        'TutorialBoat'
+        'TutorialDungeon'
     ]);
     private static readonly FIRST_SIGHT_SERVER_AUTHORITY_HOSTILE_LEVELS = new Set<string>([
         'AC_Mission1',
@@ -77,12 +75,6 @@ export class EntityHandler {
         'AC_Mission1'
     ]);
     private static readonly CANONICAL_VISIBLE_PROXY_MATCH_MAX_DISTANCE_SQ = 400 * 400;
-    private static readonly LOST_AT_SEA_COMBAT_PROXY_NAMES = new Set<string>([
-        'introdummyflier',
-        'intropsychophagebaby',
-        'introgoblinjumper',
-        'introkraken'
-    ]);
     static readonly SERVER_AUTHORITY_ENTITY_LEVEL = 50;
     private static readonly HOSTILE_BASE_HITPOINTS = [
         100, 4920, 5580, 6020, 6520, 7040, 7580, 8180, 8800, 9480, 10180, 10960, 11740, 12640, 13540, 14540,
@@ -489,15 +481,8 @@ export class EntityHandler {
 
     static estimateServerAuthorityHostileMaxHp(entity: any): number {
         const entType = GameData.getEntType(String(entity?.name ?? '')) ?? {};
-        const configuredScale = Number(entity?.serverAuthorityHitPointScale ?? NaN);
-        const hitPointScale = Number.isFinite(configuredScale) && configuredScale > 0
-            ? configuredScale
-            : Number(entity?.HitPoints ?? entity?.hitPoints ?? entType?.HitPoints ?? NaN);
-        const explicitAuthorityLevel = Math.round(Number(entity?.serverAuthorityLevel ?? 0));
-        const authorityLevel = explicitAuthorityLevel > 0
-            ? explicitAuthorityLevel
-            : EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL;
-        const baseHp = EntityHandler.getHostileBaseHpForLevel(authorityLevel);
+        const hitPointScale = Number(entity?.HitPoints ?? entity?.hitPoints ?? entType?.HitPoints ?? NaN);
+        const baseHp = EntityHandler.getHostileBaseHpForLevel(EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL);
         if (!Number.isFinite(hitPointScale) || hitPointScale <= 0) {
             return Math.max(1, baseHp);
         }
@@ -535,10 +520,7 @@ export class EntityHandler {
         const hp = dead ? 0 : Math.max(1, Math.min(maxHp, maxHp - oldDamage));
         const healthDelta = hp - maxHp;
 
-        const explicitAuthorityLevel = Math.round(Number(entity?.serverAuthorityLevel ?? 0));
-        entity.level = explicitAuthorityLevel > 0
-            ? explicitAuthorityLevel
-            : EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL;
+        entity.level = EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL;
         entity.maxHp = maxHp;
         entity.hp = hp;
         entity.healthDelta = healthDelta;
@@ -580,11 +562,6 @@ export class EntityHandler {
             sourceSwf: String(npc.sourceSwf ?? ''),
             sourceLevelClass: String(npc.sourceLevelClass ?? ''),
             sourceExtractor: String(npc.sourceExtractor ?? ''),
-            serverAuthorityLevel: Math.max(0, Math.round(Number(npc.serverAuthorityLevel ?? 0))),
-            serverAuthorityHitPointScale: Number.isFinite(Number(npc.serverAuthorityHitPointScale ?? NaN))
-                ? Math.max(0, Number(npc.serverAuthorityHitPointScale))
-                : 0,
-            lostAtSeaPhase: Math.max(0, Math.round(Number(npc.lostAtSeaPhase ?? 0))),
             groupId: npc.groupId ?? null,
             waveId: npc.waveId ?? null,
             triggerId: npc.triggerId ?? null
@@ -779,7 +756,7 @@ export class EntityHandler {
             moved++;
         }
 
-        if (oldMap.size === 0 && !LostAtSeaScene.shouldPreserveScope(oldScope)) {
+        if (oldMap.size === 0) {
             GlobalState.levelEntities.delete(oldScope);
         }
 
@@ -897,39 +874,6 @@ export class EntityHandler {
         return normalized.endsWith('hard') ? normalized.slice(0, -4) : normalized;
     }
 
-    private static isEligibleLostAtSeaProxyCanonical(
-        levelName: string | null | undefined,
-        candidate: any,
-        client: Client | null
-    ): boolean {
-        if (LevelConfig.normalizeLevelName(levelName) !== 'TutorialBoat') {
-            return true;
-        }
-
-        const sceneState = client ? LostAtSeaScene.getState(getClientLevelScope(client)) : null;
-        const candidatePhase = Math.max(0, Math.round(Number(candidate?.lostAtSeaPhase ?? 0)));
-        if (
-            !sceneState ||
-            candidatePhase !== sceneState.phase ||
-            candidate?.lostAtSeaActive !== true ||
-            Boolean(candidate?.untargetable)
-        ) {
-            return false;
-        }
-
-        if (client) {
-            const claimedLocalId = Math.max(
-                0,
-                Math.round(Number(EntityHandler.getHostileAliasMap(candidate).get(client.token) ?? 0))
-            );
-            if (claimedLocalId > 0 && client.entities.has(claimedLocalId)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     private static findServerAuthorityProxyCanonical(
         levelName: string | null | undefined,
         levelMap: Map<number, any> | null,
@@ -955,7 +899,6 @@ export class EntityHandler {
                 .filter((candidate) => {
                     if (
                         !EntityHandler.isServerAuthorityHostileEntity(levelName, candidate) ||
-                        !EntityHandler.isEligibleLostAtSeaProxyCanonical(levelName, candidate, client) ||
                         EntityHandler.normalizeServerAuthorityProxyName(candidate.name) !== proxyName
                     ) {
                         return false;
@@ -1012,9 +955,6 @@ export class EntityHandler {
                 if (!EntityHandler.isServerAuthorityHostileEntity(levelName, candidate)) {
                     continue;
                 }
-                if (!EntityHandler.isEligibleLostAtSeaProxyCanonical(levelName, candidate, client)) {
-                    continue;
-                }
                 if (EntityHandler.stripRoomFromHostileSpawnKey(candidate.spawnKey) !== proxySpawnKey) {
                     continue;
                 }
@@ -1035,9 +975,6 @@ export class EntityHandler {
         const requireClosePosition = EntityHandler.usesCanonicalVisibleServerAuthorityHostiles(levelName) && hasProxyPosition;
         for (const candidate of levelMap.values()) {
             if (!EntityHandler.isServerAuthorityHostileEntity(levelName, candidate)) {
-                continue;
-            }
-            if (!EntityHandler.isEligibleLostAtSeaProxyCanonical(levelName, candidate, client)) {
                 continue;
             }
             if (EntityHandler.normalizeServerAuthorityProxyName(candidate.name) !== proxyName) {
@@ -1609,23 +1546,6 @@ export class EntityHandler {
             EntityHandler.promoteFirstSightServerAuthorityHostile(client, levelName, levelMap, entity, rawEntityId);
         if (!canonical) {
             const localId = Math.max(0, Math.round(Number(rawEntityId || entity.id) || 0));
-            const lostAtSeaCombatProxy =
-                LevelConfig.normalizeLevelName(levelName) === 'TutorialBoat' &&
-                EntityHandler.LOST_AT_SEA_COMBAT_PROXY_NAMES.has(
-                    EntityHandler.normalizeServerAuthorityProxyName(entity.name ?? entity.EntName ?? entity.entName)
-                );
-            if (lostAtSeaCombatProxy) {
-                EntityHandler.destroyClientLocalEntity(
-                    client,
-                    localId,
-                    'lost_at_sea_inactive_wave_proxy_rejected',
-                    entity
-                );
-                console.warn(
-                    `[LostAtSeaScene] rejected inactive/unmatched combat proxy scope=${levelScope} localId=${localId} type=${String(entity.name ?? entity.EntName ?? '')} phase=${LostAtSeaScene.getState(levelScope)?.phase ?? -1}`
-                );
-                return true;
-            }
             if (EntityHandler.usesStrictServerSpawnHostiles(levelName)) {
                 EntityHandler.destroyClientLocalEntity(client, localId, 'client_hostile_rejected_no_server_spawn', entity);
                 console.warn(
@@ -1704,7 +1624,7 @@ export class EntityHandler {
             const proxyEntity = {
                 ...entity,
                 id: localId,
-                level: Math.max(1, Math.round(Number(canonical.level ?? EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL))),
+                level: EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL,
                 hp: Math.max(0, Math.round(Number(canonical.hp ?? 0))),
                 maxHp: Math.max(0, Math.round(Number(canonical.maxHp ?? 0))),
                 healthDelta: Math.round(Number(canonical.healthDelta ?? 0)),
@@ -1985,7 +1905,7 @@ export class EntityHandler {
         const bridgedEntity = {
             ...localEntity,
             id: localId,
-            level: Math.max(1, Math.round(Number(canonical.level ?? EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL))),
+            level: EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL,
             hp,
             maxHp,
             healthDelta,
@@ -2183,14 +2103,6 @@ export class EntityHandler {
             return;
         }
 
-        if (LostAtSeaScene.shouldPreserveScope(levelScope)) {
-            const sceneState = LostAtSeaScene.getState(levelScope);
-            console.log(
-                `[LostAtSeaScene] preserve scope=${levelScope} phase=${sceneState?.phase ?? -1} version=${sceneState?.phaseVersion ?? 0}`
-            );
-            return;
-        }
-
         const oldEastWingState = GlobalState.levelQuestProgress.get(levelScope);
         let removed = 0;
         for (const [entityId, entity] of Array.from(levelMap.entries())) {
@@ -2257,7 +2169,6 @@ export class EntityHandler {
         const levelMap = levelName ? EntityHandler.getLevelMapForClient(client, true) : null;
         if (levelName && levelMap && EntityHandler.hasServerSpawnedHostiles(levelName)) {
             EntityHandler.seedServerAuthorityHostiles(client, levelName, levelMap);
-            LostAtSeaScene.ensureForClient(client);
         }
         return EntityHandler.attachServerAuthorityClientHostileProxy(client, levelName, levelMap, entity, rawEntityId);
     }
@@ -4715,7 +4626,6 @@ export class EntityHandler {
         if (EntityHandler.hasServerSpawnedHostiles(levelName) && !Config.DISABLE_ALL_ENEMIES) {
             EntityHandler.resetServerAuthorityScopeForFreshRun(client, levelName, levelMap);
             EntityHandler.seedServerAuthorityHostiles(client, levelName, levelMap);
-            LostAtSeaScene.ensureForClient(client);
 
             const restoreScope = getLevelScopeKey(levelName, client.levelInstanceId);
             let bossCanonicalId = 0;
@@ -4747,7 +4657,6 @@ export class EntityHandler {
                 );
             }
             MissionHandler.trySendEastWingCompletionAfterReentry(client);
-            MissionHandler.trySendLostAtSeaCompletionAfterReentry(client);
         }
 
         const clientSpawnLevel = EntityHandler.usesClientSpawn(levelName);
@@ -4892,9 +4801,8 @@ export class EntityHandler {
                 }
             }
 
-            const levelScope = getClientLevelScope(client);
-            if (levelMap.size === 0 && !LostAtSeaScene.shouldPreserveScope(levelScope)) {
-                GlobalState.levelEntities.delete(levelScope);
+            if (levelMap.size === 0) {
+                GlobalState.levelEntities.delete(getClientLevelScope(client));
             }
         }
 

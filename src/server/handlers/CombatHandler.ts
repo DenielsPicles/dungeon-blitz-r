@@ -28,7 +28,6 @@ import { LevelConfig } from '../core/LevelConfig';
 import { DungeonSession } from '../core/DungeonSession';
 import { isRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
-import { LostAtSeaScene } from '../core/LostAtSeaScene';
 import { RewardHandler } from './RewardHandler';
 import {
     buildEastWingDeathEventId,
@@ -7414,7 +7413,7 @@ export class CombatHandler {
             }
             const levelMap = GlobalState.levelEntities.get(levelScope);
             levelMap?.delete(entityId);
-            if (levelMap && levelMap.size === 0 && !LostAtSeaScene.shouldPreserveScope(levelScope)) {
+            if (levelMap && levelMap.size === 0) {
                 GlobalState.levelEntities.delete(levelScope);
             }
             if (contributionSnapshot?.contributors?.length) {

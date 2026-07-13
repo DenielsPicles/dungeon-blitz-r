@@ -32,7 +32,6 @@ import { DebugLogger } from '../core/Debug';
 import { syncClientDungeonRunState } from '../core/DungeonRunStats';
 import { ensureCharacterSocialState, normalizeCharacterKey } from '../core/SocialState';
 import { getPartyIdForClient, areClientsInSameParty } from '../core/PartySync';
-import { LostAtSeaScene } from '../core/LostAtSeaScene';
 import { TransferTokenAllocator } from '../core/TransferTokenAllocator';
 import { normalizeGender } from '../utils/normalizeGender';
 import { ensureSigilStoreAlertState } from '../utils/AlertState';
@@ -315,7 +314,7 @@ export class CharacterHandler {
                 );
             }
 
-            if (levelMap.size === 0 && !LostAtSeaScene.shouldPreserveScope(levelScopeKey)) {
+            if (levelMap.size === 0) {
                 GlobalState.levelEntities.delete(levelScopeKey);
             }
         }

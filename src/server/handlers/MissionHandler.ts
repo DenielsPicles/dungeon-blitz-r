@@ -29,11 +29,6 @@ import {
     usesSharedDungeonProgress
 } from '../core/SharedDungeonProgress';
 import { areClientsInSameParty, getPartyIdForClient } from '../core/PartySync';
-import {
-    LOST_AT_SEA_SCENE_DURATIONS_MS,
-    LostAtSeaScene,
-    LostAtSeaScenePhase
-} from '../core/LostAtSeaScene';
 import { Character } from '../database/Database';
 import { WalletService } from '../database/WalletService';
 import { MissionDef, MissionLoader } from '../data/MissionLoader';
@@ -175,7 +170,6 @@ export class MissionHandler {
     ]);
     private static readonly REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL: Record<string, ReadonlySet<string>> = {
         CraftTownTutorial: new Set(['GoblinShamanHood']),
-        TutorialBoat: new Set(['IntroKraken']),
         AC_Mission2: new Set(['DreadLord']),
         AC_Mission2Hard: new Set(['DreadLordHard']),
         AC_Mission5: new Set(['AncientDragonBlack', 'AncientDragonSilver']),
@@ -1868,6 +1862,7 @@ export class MissionHandler {
             !levelScope ||
             !LevelConfig.isDungeonLevel(normalizedLevel) ||
             normalizedLevel === 'CraftTownTutorial' ||
+            normalizedLevel === 'TutorialBoat' ||
             getPartyIdForClient(client) <= 0
         ) {
             return;
@@ -1893,12 +1888,6 @@ export class MissionHandler {
                 `[MultiplayerSync][completion-ui-relay] viewer=${String(other.character.name ?? '').replace(/\s+/g, '_')} viewerToken=${other.token} level=${normalizedLevel} scope=${levelScope} source=${String(client.character?.name ?? '').replace(/\s+/g, '_')} sourceToken=${client.token} pendingScope=${String(other.pendingDungeonCompletionScope ?? '')}`
             );
             const scheduleOptions = MissionHandler.getSharedDungeonAutoCompleteScheduleOptions(other, levelScope);
-            if (normalizedLevel === 'TutorialBoat') {
-                // The source completion is finalized only after the shared outro;
-                // party viewers must not wait through that outro a second time.
-                scheduleOptions.initialDelayMs = 0;
-                scheduleOptions.settleDelayMs = 0;
-            }
             if (MissionHandler.shouldPreserveSharedProgressForServerAuthorityBossCompletion(normalizedLevel, levelScope)) {
                 scheduleOptions.initialDelayMs = 0;
                 scheduleOptions.settleDelayMs = 0;
@@ -2038,6 +2027,10 @@ export class MissionHandler {
             return;
         }
 
+        if (currentLevel === 'TutorialBoat') {
+            return;
+        }
+
         if (!MissionHandler.shouldForceCompleteDungeonOnEnemyDefeat(levelScope, destroyedEntity)) {
             MissionHandler.logNephitQuestCompletion('bossDeathIgnored', client, {
                 levelScope,
@@ -2119,9 +2112,6 @@ export class MissionHandler {
         }
         const waitForCutsceneEnd = isCutsceneActive ||
             (isBossEntity && MissionHandler.hasPostDeathBossCutscene(currentLevel));
-        const lostAtSeaOutroDelayMs = currentLevel === 'TutorialBoat'
-            ? LOST_AT_SEA_SCENE_DURATIONS_MS.outro
-            : 0;
         MissionHandler.logNephitQuestCompletion('bossDeathDetected', client, {
             levelScope,
             entityId: Math.max(0, Math.round(Number(triggerEntity?.id ?? 0))),
@@ -2135,8 +2125,8 @@ export class MissionHandler {
             MissionHandler.buildSyntheticLevelCompletePacket(100),
             {
                 forcedDungeonCompletionScope: levelScope,
-                initialDelayMs: lostAtSeaOutroDelayMs || ((waitForCutsceneEnd || preserveSharedProgressBossCompletion) ? 0 : undefined),
-                settleDelayMs: lostAtSeaOutroDelayMs > 0 ? 0 : ((waitForCutsceneEnd || preserveSharedProgressBossCompletion) ? 0 : undefined),
+                initialDelayMs: (waitForCutsceneEnd || preserveSharedProgressBossCompletion) ? 0 : undefined,
+                settleDelayMs: (waitForCutsceneEnd || preserveSharedProgressBossCompletion) ? 0 : undefined,
                 waitForCutsceneEnd
             }
         );
@@ -2617,45 +2607,6 @@ export class MissionHandler {
         );
         console.log(
             `[MultiplayerSync][eastwing-completion-ui-restore] player=${String(client.character?.name ?? '').replace(/\s+/g, '_')} token=${client.token} scope=${levelScope} alreadyDelivered=false sent=true`
-        );
-    }
-
-    static trySendLostAtSeaCompletionAfterReentry(client: Client): void {
-        const levelScope = getClientLevelScope(client);
-        const sceneState = LostAtSeaScene.getState(levelScope);
-        if (
-            !levelScope ||
-            !sceneState ||
-            sceneState.phase < LostAtSeaScenePhase.Outro ||
-            MissionHandler.hasFinalizedDungeonCompletion(client, levelScope) ||
-            MissionHandler.hasRemainingDungeonHostiles(levelScope)
-        ) {
-            return;
-        }
-
-        const now = Date.now();
-        const remainingOutroMs = sceneState.phase === LostAtSeaScenePhase.Outro
-            ? Math.max(
-                0,
-                sceneState.phaseStartedAt + LOST_AT_SEA_SCENE_DURATIONS_MS.outro - now
-            )
-            : 0;
-        if (client.character) {
-            client.character.questTrackerState = 100;
-            MissionHandler.sendQuestProgress(client, 100);
-        }
-        MissionHandler.scheduleDungeonCompletion(
-            client,
-            MissionHandler.buildSyntheticLevelCompletePacket(100),
-            {
-                forcedDungeonCompletionScope: levelScope,
-                initialDelayMs: remainingOutroMs,
-                settleDelayMs: 0,
-                waitForCutsceneEnd: false
-            }
-        );
-        console.log(
-            `[LostAtSeaScene] completion-restore player=${String(client.character?.name ?? '').replace(/\s+/g, '_')} scope=${levelScope} phase=${sceneState.phase} remainingOutroMs=${remainingOutroMs}`
         );
     }
 
@@ -4270,15 +4221,6 @@ export class MissionHandler {
                 MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope)
             );
 
-        if (currentLevel === 'TutorialBoat') {
-            return {
-                forcedDungeonCompletionScope: levelScope,
-                initialDelayMs: LOST_AT_SEA_SCENE_DURATIONS_MS.outro,
-                settleDelayMs: 0,
-                waitForCutsceneEnd: false
-            };
-        }
-
         return {
             forcedDungeonCompletionScope: levelScope,
             initialDelayMs: waitForCutsceneEnd ? 0 : undefined,
@@ -4433,6 +4375,7 @@ export class MissionHandler {
             !currentLevel ||
             !levelScope ||
             !LevelConfig.isDungeonLevel(currentLevel) ||
+            currentLevel === 'TutorialBoat' ||
             MissionHandler.hasFinalizedDungeonCompletion(client, levelScope) ||
             client.forcedDungeonCompletionScope === levelScope
         ) {

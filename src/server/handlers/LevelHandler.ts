@@ -63,7 +63,6 @@ import {
     logEastWingEnemyMutation,
     logEastWingProgressBlocked
 } from '../core/EastWingEnemyDebug';
-import { LOST_AT_SEA_ROOM_ID, LostAtSeaScene } from '../core/LostAtSeaScene';
 import { DungeonSession } from '../core/DungeonSession';
 
 const db = new JsonAdapter();
@@ -838,28 +837,6 @@ export class LevelHandler {
                 }
                 syncQuestProgress = LevelHandler.normalizeQuestProgress(anchorState.syncQuestProgress) ?? syncQuestProgress;
             }
-        }
-
-        const resumableLostAtSeaRun =
-            shouldSyncDungeonProgress &&
-            !anchor &&
-            !normalizeLevelInstanceId(teleportOverride?.levelInstanceId) &&
-            normalizedTargetLevel === 'TutorialBoat'
-                ? LostAtSeaScene.resolveResumableRun(client, normalizedTargetLevel)
-                : null;
-        if (resumableLostAtSeaRun) {
-            levelInstanceId = resumableLostAtSeaRun.levelInstanceId;
-            syncAnchorStartedAt = LevelHandler.normalizeSyncAnchorStartedAt(resumableLostAtSeaRun.createdAt) ?? syncAnchorStartedAt;
-            syncAnchorToken = resumableLostAtSeaRun.anchorToken || syncAnchorToken;
-            syncAnchorCharacterName = resumableLostAtSeaRun.anchorCharacterName || syncAnchorCharacterName;
-            syncRoomId = LOST_AT_SEA_ROOM_ID;
-            syncStartedRoomIds = [LOST_AT_SEA_ROOM_ID];
-            syncQuestProgress = LevelHandler.normalizeQuestProgress(
-                GlobalState.levelQuestProgress.get(resumableLostAtSeaRun.levelScope)?.progress
-            ) ?? syncQuestProgress;
-            console.log(
-                `[LostAtSeaScene] resume player=${String(client.character?.name ?? '').replace(/\s+/g, '_')} scope=${resumableLostAtSeaRun.levelScope} phase=${LostAtSeaScene.getState(resumableLostAtSeaRun.levelScope)?.phase ?? -1}`
-            );
         }
 
         if (shouldSyncDungeonProgress) {
@@ -2897,7 +2874,6 @@ export class LevelHandler {
         finalizeDungeonRun(client, 'leave');
         client.dungeonRun = null;
         client.currentRoomId = 0;
-        client.lostAtSeaRoomStateId = null;
         client.startedRoomEvents.clear();
         client.levelInstanceId = '';
         client.syncAnchorStartedAt = 0;

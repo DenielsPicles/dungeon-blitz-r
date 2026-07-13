@@ -169,7 +169,6 @@ export class Client {
     public entryY: number = 0;
     public entryHasCoord: boolean = false;
     public currentRoomId: number = -1;
-    public lostAtSeaRoomStateId: number | null = null;
     public lastDoorId: number = -1;
     public lastDoorTargetLevel: string = "";
     public playerSpawned: boolean = false;
@@ -430,7 +429,6 @@ export class Client {
         this.entryY = 0;
         this.entryHasCoord = false;
         this.currentRoomId = -1;
-        this.lostAtSeaRoomStateId = null;
         this.lastDoorId = -1;
         this.lastDoorTargetLevel = "";
         this.playerSpawned = false;

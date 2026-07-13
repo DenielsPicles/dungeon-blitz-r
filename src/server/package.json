@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -16,8 +16,6 @@
     "reset-password": "ts-node scripts/set_account_password.ts",
     "validate:east-wing-spawns": "node tools/exportTheEastWingEnemies.js",
     "validate:dungeon-spawns": "node tools/exportTheEastWingEnemies.js",
-    "export:lost-at-sea-spawns": "node tools/exportLostAtSeaEnemies.js",
-    "validate:lost-at-sea-spawns": "node tools/exportLostAtSeaEnemies.js --verify",
     "export:goblin-kidnappers-spawns": "node tools/exportGoblinKidnappersEnemies.js",
     "test:goblin-kidnappers-authority": "ts-node --transpile-only test/goblin_kidnappers_server_authority_regression.ts"
   },
