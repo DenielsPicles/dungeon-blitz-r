@@ -3805,7 +3805,12 @@ export class LevelHandler {
             }
             return 'completed_duplicate';
         }
-        if (existing?.active && existing.ownerToken > 0 && existing.ownerToken !== client.token) {
+        if (
+            existing?.active &&
+            existing.ownerToken > 0 &&
+            existing.ownerToken !== client.token &&
+            !DungeonSession.isAuthoritativeLevel(client.currentLevel)
+        ) {
             return 'active_duplicate';
         }
 

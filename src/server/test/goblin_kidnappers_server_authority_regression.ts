@@ -9,6 +9,7 @@ import { GlobalState } from '../core/GlobalState';
 import { LevelConfig } from '../core/LevelConfig';
 import { getLevelScopeKey } from '../core/LevelScope';
 import { DungeonSpawnLoader } from '../data/DungeonSpawnLoader';
+import { LevelHandler } from '../handlers/LevelHandler';
 import { BitBuffer } from '../network/protocol/bitBuffer';
 
 type FakeClient = {
@@ -24,6 +25,11 @@ type FakeClient = {
     entityIdAliases: Map<number, number>;
     entities: Map<number, any>;
     sentPackets: Array<{ id: number; payload: Buffer }>;
+    activeDungeonCutsceneScope: string;
+    activeDungeonCutsceneRoomId: number;
+    lastDungeonCutsceneStartAt: number;
+    activeDungeonCutsceneJoinedAtDialogIndex: number;
+    activeDungeonCutsceneLocalDialogIndex: number;
     character: {
         name: string;
         level: number;
@@ -54,6 +60,11 @@ function createClient(token: number, roomId: number = 0): FakeClient {
         entityIdAliases: new Map<number, number>(),
         entities: new Map<number, any>(),
         sentPackets,
+        activeDungeonCutsceneScope: '',
+        activeDungeonCutsceneRoomId: -1,
+        lastDungeonCutsceneStartAt: 0,
+        activeDungeonCutsceneJoinedAtDialogIndex: 0,
+        activeDungeonCutsceneLocalDialogIndex: 0,
         character: {
             name: `GoblinKidnappersTester${token}`,
             level: 30,
@@ -75,6 +86,7 @@ function resetState(): void {
     GlobalState.sessionsByToken.clear();
     GlobalState.levelEntities.clear();
     GlobalState.dungeonSessions.clear();
+    GlobalState.dungeonCutscenes.clear();
 }
 
 function loadData(): void {
@@ -169,6 +181,26 @@ function testServerAiAndSnapshot(scope: string, member: FakeClient, reconnect: F
     assert.equal(DungeonSession.canPlayerInteractWithEntity(member as never, hostile), false, 'players cannot damage enemies in an old room');
     member.currentRoomId = 4;
 
+    const bossWithLiveArenaRoom = {
+        ...hostile,
+        id: canonicalId + 1,
+        canonicalId: canonicalId + 1,
+        name: 'GoblinBoss1',
+        entType: 'GoblinBoss1',
+        boss: true,
+        roomBoss: true,
+        isRoomBoss: true,
+        roomId: 8,
+        roomBossRoomId: 9
+    };
+    member.currentRoomId = 9;
+    assert.equal(
+        DungeonSession.canPlayerInteractWithEntity(member as never, bossWithLiveArenaRoom),
+        true,
+        'the live BossFight arena id must override the authored boss spawn room for combat'
+    );
+    member.currentRoomId = 4;
+
     const previousX = hostile.x;
     AILogic.updateLevel(scope);
     assert.ok(hostile.x > previousX, 'server AI must continue moving an activated enemy without the leader');
@@ -184,6 +216,82 @@ function testServerAiAndSnapshot(scope: string, member: FakeClient, reconnect: F
     assert.equal(snapshot.activeEntities[0].entityId, canonicalId);
     assert.equal(snapshot.activeEntities[0].targetPlayerId, member.clientEntID);
     assert.equal(snapshot.activeEntities[0].state, String(EntityState.ACTIVE));
+
+    const boss: any = {
+        ...hostile,
+        id: canonicalId + 1,
+        canonicalId: canonicalId + 1,
+        name: 'GoblinBoss1',
+        entType: 'GoblinBoss1',
+        boss: true,
+        roomBoss: true,
+        isRoomBoss: true,
+        roomId: 8,
+        roomBossRoomId: 9,
+        x: 0,
+        y: 0,
+        localIdsByToken: new Map<number, number>([[member.token, 7002]])
+    };
+    entities.clear();
+    entities.set(boss.id, boss);
+    member.currentRoomId = 9;
+    reconnect.currentRoomId = 4;
+    const bossX = boss.x;
+    AILogic.updateLevel(scope);
+    assert.equal(boss.aggroTargetEntityId, member.clientEntID, 'Tag Ugo must target a player in its live BossFight arena');
+    assert.ok(boss.x > bossX, 'Tag Ugo server AI must engage across authored/live boss-room id drift');
+}
+
+function testJoiningPlayerCanReleaseBossIntro(): void {
+    const owner = createClient(201, 8);
+    const joiner = createClient(202, 8);
+    const scope = getLevelScopeKey(LEVEL, INSTANCE);
+    for (const client of [owner, joiner]) {
+        client.activeDungeonCutsceneScope = scope;
+        client.activeDungeonCutsceneRoomId = 8;
+        client.lastDungeonCutsceneStartAt = Date.now();
+        GlobalState.sessionsByToken.set(client.token, client as never);
+        DungeonSession.getOrCreate(client as never);
+    }
+
+    const boss: any = {
+        id: 9500060,
+        canonicalId: 9500060,
+        name: 'GoblinBoss1',
+        isPlayer: false,
+        team: EntityTeam.ENEMY,
+        roomId: 8,
+        roomBossRoomId: 8,
+        boss: true,
+        roomBoss: true,
+        isRoomBoss: true,
+        hp: 100,
+        maxHp: 100,
+        entState: EntityState.ACTIVE,
+        serverSpawned: true,
+        serverAuthorityHostile: true,
+        untargetable: true,
+        localIdsByToken: new Map<number, number>()
+    };
+    GlobalState.levelEntities.set(scope, new Map<number, any>([[boss.id, boss]]));
+    GlobalState.dungeonCutscenes.set(`${scope}:8`, {
+        roomId: 8,
+        ownerToken: owner.token,
+        active: true,
+        completed: false,
+        startedAt: Date.now(),
+        endedAt: 0,
+        dialogIndex: 0
+    });
+
+    const close = new BitBuffer(false);
+    close.writeMethod9(8);
+    LevelHandler.handleRoomClose(joiner as never, close.toBuffer());
+
+    const cutscene = GlobalState.dungeonCutscenes.get(`${scope}:8`);
+    assert.equal(cutscene?.active, false, 'a joining player close must not leave the shared boss intro active');
+    assert.equal(cutscene?.completed, true, 'a joining player close must complete the shared boss intro');
+    assert.equal(boss.untargetable, false, 'finishing the shared intro must make Tag Ugo targetable');
 }
 
 function main(): void {
@@ -192,6 +300,8 @@ function main(): void {
     testExtractedRoster();
     const { scope, member, reconnect } = testMonotonicSessionLateJoinAndLeaderExit();
     testServerAiAndSnapshot(scope, member, reconnect);
+    resetState();
+    testJoiningPlayerCanReleaseBossIntro();
     resetState();
     console.log('Goblin Kidnappers server-authority regression checks passed.');
 }

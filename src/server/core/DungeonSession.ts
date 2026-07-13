@@ -267,7 +267,10 @@ export class DungeonSession {
     static canPlayerInteractWithEntity(client: Client, entity: any): boolean {
         if (!DungeonSession.isAuthoritativeLevel(client.currentLevel) || !entity || entity.isPlayer) return true;
         const playerRoomId = normalizeRoomId(client.currentRoomId);
-        const entityRoomId = normalizeRoomId(entity.roomId);
+        // BossFight packets carry the live client arena id separately from the
+        // authored spawn-room id. Prefer that marker so a canonical boss and
+        // its client proxy cannot become mutually unhittable after a cutscene.
+        const entityRoomId = normalizeRoomId(entity.roomBossRoomId ?? entity.roomId);
         return playerRoomId < 0 || entityRoomId < 0 || playerRoomId === entityRoomId;
     }
 

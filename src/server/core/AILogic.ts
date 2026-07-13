@@ -137,9 +137,8 @@ export class AILogic {
             if (!p.character || !p.character.CurrentLevel) continue;
             if (CombatHandler.isPlayerDeadForCombat(p, levelScope)) continue;
             if (!isBoss && aggroTargetEntityId > 0 && p.clientEntID !== aggroTargetEntityId) continue;
-            const playerRoomId = Number.isFinite(Number(p.currentRoomId)) ? Math.round(Number(p.currentRoomId)) : -1;
             if (isBoss) {
-                if (playerRoomId < 0 || npcRoomId < 0 || playerRoomId !== Math.round(npcRoomId)) continue;
+                if (!DungeonSession.canPlayerInteractWithEntity(p, npc)) continue;
             } else if (!sharesRoomIds(p.currentRoomId, npcRoomId)) {
                 continue;
             }
