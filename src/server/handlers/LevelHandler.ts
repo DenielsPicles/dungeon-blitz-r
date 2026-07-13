@@ -26,7 +26,7 @@ import { NpcLoader, NpcDef } from '../data/NpcLoader';
 import { DialogueTranslationLoader } from '../data/DialogueTranslationLoader';
 import { MissionID } from '../data/runtime';
 import { Entity, EntityState, EntityTeam } from '../core/Entity';
-import { Character } from '../database/Database';
+import { Character, UserAccount } from '../database/Database';
 import { EntityHandler } from './EntityHandler';
 import { MissionHandler } from './MissionHandler';
 import { PetHandler } from './PetHandler';
@@ -295,6 +295,8 @@ export class LevelHandler {
         target.character = source.character;
         target.craftTownHostCharacter = source.craftTownHostCharacter;
         target.userId = source.userId;
+        target.account = source.account;
+        target.authenticated = source.authenticated;
         target.characters = Array.isArray(source.characters) ? [...source.characters] : [];
         target.currentLevel = source.currentLevel;
         target.levelInstanceId = source.levelInstanceId;
@@ -4670,6 +4672,7 @@ export class LevelHandler {
         token: number,
         character: any,
         userId: number | null,
+        account: UserAccount | null | undefined,
         targetLevel: string,
         previousLevel: string,
         newX: number,
@@ -4703,6 +4706,8 @@ export class LevelHandler {
                 character,
                 craftTownHostCharacter,
                 userId,
+                account: account ?? undefined,
+                accountEmail: account?.email,
                 targetLevel,
                 levelInstanceId: levelInstanceId || undefined,
                 previousLevel,
@@ -4855,6 +4860,9 @@ export class LevelHandler {
 
             client.character = usedEntry.character;
             client.userId = usedEntry.userId;
+            client.account = usedEntry.account ?? (usedEntry.accountEmail
+                ? { email: usedEntry.accountEmail, user_id: usedEntry.userId }
+                : client.account);
             client.currentLevel = usedEntry.targetLevel;
             client.craftTownHostCharacter = usedEntry.targetLevel === 'CraftTown'
                 ? usedEntry.craftTownHostCharacter ?? null
@@ -4933,6 +4941,9 @@ export class LevelHandler {
         if (pendingEntry) {
             client.character = pendingEntry.character;
             client.userId = pendingEntry.userId;
+            client.account = pendingEntry.account ?? (pendingEntry.accountEmail
+                ? { email: pendingEntry.accountEmail, user_id: pendingEntry.userId }
+                : client.account);
             client.currentLevel = pendingEntry.targetLevel;
             client.craftTownHostCharacter = pendingEntry.targetLevel === 'CraftTown'
                 ? pendingEntry.craftTownHostCharacter ?? null
@@ -5789,6 +5800,7 @@ export class LevelHandler {
             newToken,
             activeCharacter,
             client.userId,
+            client.account,
             targetLevel,
             effectivePreviousLevel,
             newX,

@@ -1115,6 +1115,7 @@ export class CharacterHandler {
                 levelInstanceId: levelInstanceId || undefined,
                 previousLevel: previousLevelName,
                 userId: client.userId,
+                account: client.account ?? undefined,
                 accountEmail: client.account?.email,
                 newX: spawn.x,
                 newY: spawn.y,
@@ -1204,9 +1205,9 @@ export class CharacterHandler {
             : null;
         PetHandler.normalizeMountState(client.character);
         client.userId = entry.userId;
-        client.account = entry.accountEmail
+        client.account = entry.account ?? (entry.accountEmail
             ? { email: entry.accountEmail, user_id: entry.userId }
-            : null;
+            : null);
         client.token = token;
         client.clientEntID = 0;
         client.currentLevel = entry.targetLevel;
@@ -1339,6 +1340,8 @@ export class CharacterHandler {
             character: liveCharacter,
             craftTownHostCharacter: client.craftTownHostCharacter ?? undefined,
             userId: entry.userId,
+            account: client.account ?? entry.account,
+            accountEmail: client.account?.email ?? entry.accountEmail,
             targetLevel: entry.targetLevel,
             levelInstanceId: client.levelInstanceId || undefined,
             previousLevel: entry.previousLevel,

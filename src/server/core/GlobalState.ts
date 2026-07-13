@@ -10,6 +10,7 @@ export interface PendingTransfer {
     levelInstanceId?: string;
     previousLevel: string;
     userId: number;
+    account?: UserAccount;
     accountEmail?: string;
     newX?: number;
     newY?: number;
@@ -302,19 +303,88 @@ export class GlobalState {
         return typeof value === 'string' ? value.trim().toLowerCase() : '';
     }
 
+    static getAccountIdentityIdentifiers(account: Pick<UserAccount, 'email' | 'emailAliases' | 'discordEmail'> | null | undefined): Set<string> {
+        const identifiers = new Set<string>();
+        const add = (value: unknown): void => {
+            const normalized = GlobalState.normalizeAccountIdentifier(value);
+            if (normalized) {
+                identifiers.add(normalized);
+            }
+        };
+
+        add(account?.email);
+        add(account?.discordEmail);
+        if (Array.isArray(account?.emailAliases)) {
+            for (const alias of account.emailAliases) {
+                add(alias);
+            }
+        }
+
+        return identifiers;
+    }
+
+    static accountsShareIdentity(
+        left: Pick<UserAccount, 'email' | 'emailAliases' | 'discordEmail'> | null | undefined,
+        right: Pick<UserAccount, 'email' | 'emailAliases' | 'discordEmail'> | null | undefined
+    ): boolean {
+        const leftIdentifiers = GlobalState.getAccountIdentityIdentifiers(left);
+        if (leftIdentifiers.size === 0) {
+            return false;
+        }
+
+        for (const identifier of GlobalState.getAccountIdentityIdentifiers(right)) {
+            if (leftIdentifiers.has(identifier)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static accountMatchesIdentifier(account: UserAccount, identifier: string): boolean {
         const normalizedIdentifier = GlobalState.normalizeAccountIdentifier(identifier);
         if (!normalizedIdentifier) {
             return false;
         }
-        if (GlobalState.normalizeAccountIdentifier(account.email) === normalizedIdentifier) {
-            return true;
+
+        return GlobalState.getAccountIdentityIdentifiers(account).has(normalizedIdentifier);
+    }
+
+    static isClientConnectionOpen(session: Client | null | undefined): session is Client {
+        if (!session) {
+            return false;
         }
-        if (GlobalState.normalizeAccountIdentifier(account.discordEmail) === normalizedIdentifier) {
-            return true;
+
+        const socket = (session as unknown as { socket?: { destroyed?: boolean; readyState?: string } }).socket;
+        return !socket || (!socket.destroyed && socket.readyState === 'open');
+    }
+
+    static getOpenClients(): Client[] {
+        const seen = new Set<Client>();
+        const clients: Client[] = [];
+        const add = (session: Client | null | undefined): void => {
+            if (!GlobalState.isClientConnectionOpen(session) || seen.has(session)) {
+                return;
+            }
+
+            seen.add(session);
+            clients.push(session);
+        };
+
+        for (const client of GlobalState.clients) {
+            add(client);
         }
-        return Array.isArray(account.emailAliases) &&
-            account.emailAliases.some((alias) => GlobalState.normalizeAccountIdentifier(alias) === normalizedIdentifier);
+        for (const session of GlobalState.sessionsByToken.values()) {
+            add(session);
+        }
+        for (const session of GlobalState.sessionsByUserId.values()) {
+            add(session);
+        }
+        for (const session of GlobalState.sessionsByCharacterName.values()) {
+            add(session);
+        }
+
+        return clients;
     }
 
     static isSessionOpen(session: Client | null | undefined): session is Client {
@@ -322,8 +392,7 @@ export class GlobalState {
             return false;
         }
 
-        const socket = (session as unknown as { socket?: { destroyed?: boolean; readyState?: string } }).socket;
-        return !socket || (!socket.destroyed && socket.readyState === 'open');
+        return GlobalState.isClientConnectionOpen(session);
     }
 
     private static hasActiveTokenIndex(session: Client): boolean {
