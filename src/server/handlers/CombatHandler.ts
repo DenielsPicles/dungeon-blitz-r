@@ -25,6 +25,7 @@ import { GameData } from '../core/GameData';
 import { CharacterSync } from '../utils/CharacterSync';
 import { sendConsumableUpdate } from '../utils/ConsumableState';
 import { LevelConfig } from '../core/LevelConfig';
+import { DungeonSession } from '../core/DungeonSession';
 import { isRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import { LostAtSeaScene } from '../core/LostAtSeaScene';
@@ -6773,6 +6774,14 @@ export class CombatHandler {
         }
 
         const sourceSession = CombatHandler.resolveCombatSourceSession(levelScope, sourceId, client);
+        const roomActor = isHostileNpcSource ? client : sourceSession;
+        const roomEntity = isHostileNpcSource ? sourceEntity : targetEntity;
+        if (roomActor && roomEntity && !DungeonSession.canPlayerInteractWithEntity(roomActor, roomEntity)) {
+            console.warn(
+                `[DungeonSession][enemy:damaged] sessionId=${String(roomActor.levelInstanceId || levelScope)} roomId=${Math.round(Number(roomActor.currentRoomId ?? -1))} entityId=${Math.round(Number(roomEntity.id ?? 0))} result=rejected_room_mismatch entityRoomId=${Math.round(Number(roomEntity.roomId ?? -1))}`
+            );
+            return;
+        }
         if (CombatHandler.shouldSuppressForeignOwnedHit(client, sourceSession, isHostileNpcSource)) {
             return;
         }
@@ -6920,6 +6929,11 @@ export class CombatHandler {
             );
             const resolution = CombatHandler.updateNpcTargetAfterHit(levelScope, targetId, damage, sourceId, deathContext);
             if (resolution.entity && Math.max(0, Math.round(Number(resolution.appliedDamage ?? 0))) > 0) {
+                DungeonSession.noteEntityState(
+                    levelScope,
+                    resolution.entity,
+                    resolution.killed ? 'enemy:died' : (Boolean(resolution.entity?.boss ?? resolution.entity?.roomBoss ?? resolution.entity?.isRoomBoss) ? 'boss:stateUpdated' : 'enemy:damaged')
+                );
                 CombatHandler.logHpMutation(
                     'powerhit',
                     sourceSession ?? client,

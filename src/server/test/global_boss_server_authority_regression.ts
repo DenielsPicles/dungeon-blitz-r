@@ -211,11 +211,12 @@ async function testWolfsEndBossProxyAndRegularHostile(levelName: 'TutorialDungeo
     const scope = getLevelScopeKey(levelName, client.levelInstanceId);
     const levelMap = GlobalState.levelEntities.get(scope);
     assert.ok(levelMap, `${levelName} must have a level entity map`);
-    const bosses = Array.from(levelMap.values()).filter((entity) =>
+    const canonicalHostiles = Array.from(levelMap.values()).filter((entity) =>
         EntityHandler.isServerAuthorityHostileEntity(levelName, entity)
     );
-    assert.equal(bosses.length, 1, `${levelName} must seed exactly one canonical boss`);
-    const boss = bosses[0];
+    assert.equal(canonicalHostiles.length, levelName === 'TutorialDungeon' ? 76 : 1, `${levelName} must seed its canonical hostile roster`);
+    const boss = canonicalHostiles.find((entity) => Boolean(entity.boss ?? entity.roomBoss ?? entity.isRoomBoss));
+    assert.ok(boss, `${levelName} must seed exactly one canonical boss`);
     assert.equal(Boolean(boss.clientSpawned), false, `${levelName} boss must be server canonical`);
 
     const localBossId = levelName.endsWith('Hard') ? 820002 : 810001;
@@ -227,14 +228,27 @@ async function testWolfsEndBossProxyAndRegularHostile(levelName: 'TutorialDungeo
     assert.equal(levelMap.has(localBossId), false, `${levelName} client boss cue must not create a second canonical entity`);
 
     const regularLocalId = localBossId + 100;
-    const regularName = levelName.endsWith('Hard') ? 'GoblinDaggerHard' : 'GoblinDagger';
+    const canonicalRegular = canonicalHostiles.find((entity) => !Boolean(entity.boss ?? entity.roomBoss ?? entity.isRoomBoss));
+    const regularName = levelName.endsWith('Hard') ? 'GoblinDaggerHard' : String(canonicalRegular?.name ?? 'GoblinDagger');
     EntityHandler.handleEntityFullUpdate(
         client as never,
-        buildHostileFullUpdate(regularLocalId, regularName, Number(boss.x) - 500, Number(boss.y), Number(boss.roomId))
+        buildHostileFullUpdate(
+            regularLocalId,
+            regularName,
+            Number(canonicalRegular?.x ?? Number(boss.x) - 500),
+            Number(canonicalRegular?.y ?? boss.y),
+            Number(canonicalRegular?.roomId ?? boss.roomId)
+        )
     );
-    assert.equal(EntityHandler.resolveEntityAlias(client as never, regularLocalId), regularLocalId, `${levelName} regular hostile must stay client-owned`);
-    assert.equal(Boolean(client.entities.get(regularLocalId)?.clientSpawned), true, `${levelName} regular hostile must remain a client spawn`);
-    assert.equal(EntityHandler.isServerAuthorityHostileEntity(levelName, client.entities.get(regularLocalId)), false, `${levelName} regular hostile must not enter boss authority`);
+    if (levelName === 'TutorialDungeon') {
+        assert.ok(canonicalRegular, 'Goblin Kidnappers must include canonical normal enemies');
+        assert.equal(EntityHandler.resolveEntityAlias(client as never, regularLocalId), canonicalRegular.id, `${levelName} regular hostile cue must alias to canonical enemy`);
+        assert.equal(levelMap.has(regularLocalId), false, `${levelName} regular hostile cue must not double-spawn`);
+    } else {
+        assert.equal(EntityHandler.resolveEntityAlias(client as never, regularLocalId), regularLocalId, `${levelName} regular hostile must stay client-owned`);
+        assert.equal(Boolean(client.entities.get(regularLocalId)?.clientSpawned), true, `${levelName} regular hostile must remain a client spawn`);
+        assert.equal(EntityHandler.isServerAuthorityHostileEntity(levelName, client.entities.get(regularLocalId)), false, `${levelName} regular hostile must not enter boss authority`);
+    }
 
     client.currentRoomId = Number(boss.roomId);
     await CombatHandler.handlePowerCast(client as never, buildPowerCastPayload(client.clientEntID));
@@ -246,6 +260,62 @@ async function testWolfsEndBossProxyAndRegularHostile(levelName: 'TutorialDungeo
     assert.equal(boss.dead, true, `${levelName} lethal player damage must mark canonical boss dead`);
     assert.equal(boss.destroyed, true, `${levelName} lethal player damage must finalize canonical boss destruction`);
     assert.equal(Math.max(0, Number(boss.deathVersion ?? 0)), 1, `${levelName} canonical boss death must commit once`);
+}
+
+async function testGoblinKidnappersConcurrentCanonicalDamage(): Promise<void> {
+    const first = createFakeClient('TutorialDungeon', 'goblin-kidnappers-concurrent-hit', 54004);
+    const second = createFakeClient('TutorialDungeon', 'goblin-kidnappers-concurrent-hit', 54005);
+    attachPlayer(first);
+    attachPlayer(second);
+    GlobalState.sessionsByToken.set(first.token, first as never);
+    GlobalState.sessionsByToken.set(second.token, second as never);
+    const partyId = 54000;
+    GlobalState.partyGroups.set(partyId, {
+        id: partyId,
+        leader: first.character.name,
+        members: [first.character.name, second.character.name],
+        locked: false
+    });
+    GlobalState.partyByMember.set(first.character.name.toLowerCase(), partyId);
+    GlobalState.partyByMember.set(second.character.name.toLowerCase(), partyId);
+    EntityHandler.sendInitialLevelEntities(first as never, 'TutorialDungeon');
+    EntityHandler.sendInitialLevelEntities(second as never, 'TutorialDungeon');
+
+    const scope = getLevelScopeKey('TutorialDungeon', first.levelInstanceId);
+    const levelMap = GlobalState.levelEntities.get(scope);
+    assert.ok(levelMap);
+    const target = Array.from(levelMap.values()).find((entity) =>
+        EntityHandler.isServerAuthorityHostileEntity('TutorialDungeon', entity) &&
+        !Boolean(entity.boss ?? entity.roomBoss ?? entity.isRoomBoss)
+    );
+    assert.ok(target, 'Goblin Kidnappers must expose a canonical normal-enemy target');
+
+    first.currentRoomId = Number(target.roomId);
+    second.currentRoomId = Number(target.roomId);
+    const firstLocalId = 840401;
+    const secondLocalId = 840501;
+    EntityHandler.handleEntityFullUpdate(first as never, buildHostileFullUpdate(firstLocalId, String(target.name), Number(target.x), Number(target.y), Number(target.roomId)));
+    EntityHandler.handleEntityFullUpdate(second as never, buildHostileFullUpdate(secondLocalId, String(target.name), Number(target.x), Number(target.y), Number(target.roomId)));
+    assert.equal(EntityHandler.resolveEntityAlias(first as never, firstLocalId), target.id);
+    assert.equal(EntityHandler.resolveEntityAlias(second as never, secondLocalId), target.id);
+
+    await Promise.all([
+        CombatHandler.handlePowerCast(first as never, buildPowerCastPayload(first.clientEntID)),
+        CombatHandler.handlePowerCast(second as never, buildPowerCastPayload(second.clientEntID))
+    ]);
+    first.sentPackets.length = 0;
+    second.sentPackets.length = 0;
+    const damage = Math.floor(Math.max(2, Number(target.maxHp ?? target.hp ?? 2)) / 2) + 1;
+    await Promise.all([
+        CombatHandler.handlePowerHit(first as never, buildPowerHitPayload(firstLocalId, first.clientEntID, damage)),
+        CombatHandler.handlePowerHit(second as never, buildPowerHitPayload(secondLocalId, second.clientEntID, damage))
+    ]);
+    assert.equal(target.hp, 0, 'two players must reduce one canonical HP pool');
+    assert.equal(target.dead, true, 'the shared enemy must die for both players');
+    assert.equal(Math.max(0, Number(target.deathVersion ?? 0)), 1, 'concurrent lethal damage must commit death exactly once');
+    assert.equal(levelMap.has(firstLocalId) || levelMap.has(secondLocalId), false, 'client proxies must not become duplicate server entities');
+    assert.ok(first.sentPackets.some((packet) => packet.id === 0x78) && second.sentPackets.some((packet) => packet.id === 0x78), 'both party members must receive canonical HP updates');
+    assert.ok(first.sentPackets.some((packet) => packet.id === 0x0D) && second.sentPackets.some((packet) => packet.id === 0x0D), 'both party members must receive the one canonical death/despawn');
 }
 
 function testMultiBossProxyIdentity(): void {
@@ -295,6 +365,10 @@ async function main(): Promise<void> {
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         await testWolfsEndBossProxyAndRegularHostile('TutorialDungeonHard');
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        await testGoblinKidnappersConcurrentCanonicalDamage();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();

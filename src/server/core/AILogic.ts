@@ -10,6 +10,7 @@ import { sharesRoomIds } from './PartySync';
 import { getClientLevelScope, getScopeLevelName } from './LevelScope';
 import { LevelConfig } from './LevelConfig';
 import { LostAtSeaScene } from './LostAtSeaScene';
+import { DungeonSession } from './DungeonSession';
 
 
 export class AILogic {
@@ -98,9 +99,15 @@ export class AILogic {
         // Iterate over Map entries to get ID and Object
         for (const [entId, npc] of levelEntities.entries()) {
             if (npc.isPlayer || npc.team !== 2) continue; // Only Enemy NPCs
-            if (EntityHandler.hasServerSpawnedHostiles(levelName) && !AILogic.ENABLE_SERVER_AUTHORITY_HOSTILE_AI) continue; // Server-spawned bosses use client proxies for AI/animation.
-            if (Boolean(npc.hybridCanonicalHostile) && !AILogic.ENABLE_SERVER_AUTHORITY_HOSTILE_AI) continue; // TODO: feature-flag server AI for promoted hybrid hostiles.
+            const dungeonSessionServerAi = DungeonSession.usesServerAi(levelName);
+            if (EntityHandler.hasServerSpawnedHostiles(levelName) && !AILogic.ENABLE_SERVER_AUTHORITY_HOSTILE_AI && !dungeonSessionServerAi) continue; // Legacy bosses keep their client proxy AI unless their dungeon definition opts into server AI.
+            if (Boolean(npc.hybridCanonicalHostile) && !AILogic.ENABLE_SERVER_AUTHORITY_HOSTILE_AI && !dungeonSessionServerAi) continue;
             if (npc.clientSpawned) continue; // Client-owned monsters should not receive server AI movement.
+            if (
+                dungeonSessionServerAi &&
+                (!(npc.localIdsByToken instanceof Map) ||
+                    !Array.from(npc.localIdsByToken.keys()).some((token) => players.some((player) => player.token === token)))
+            ) continue; // Held/scripted waves activate only after at least one live client proxy exists.
             // Simple dead check (if no hp prop, assume 100)
             if ((npc.hp !== undefined && npc.hp <= 0)) continue;
             const npcRoomId = Number.isFinite(Number(npc?.roomId)) ? Math.round(Number(npc.roomId)) : -1;
@@ -124,7 +131,7 @@ export class AILogic {
         AILogic.clearDeadAggroTarget(npc, players, levelScope);
         const aggroTargetEntityId = Math.max(0, Math.round(Number(npc?.aggroTargetEntityId ?? 0)));
 
-        if (isDungeonLevel && !isBoss && !AILogic.hasCombatPull(npc)) {
+        if (isDungeonLevel && !isBoss && !AILogic.hasCombatPull(npc) && !DungeonSession.usesServerAi(levelName)) {
             return;
         }
 
@@ -149,11 +156,16 @@ export class AILogic {
         }
 
         if (!target || !target.character || !target.character.CurrentLevel) {
+            npc.attackState = 'idle';
+            npc.animationState = 'idle';
             if (isBoss && aggroTargetEntityId > 0) {
                 AILogic.clearAggroTarget(npc);
             }
             return;
         }
+
+        npc.aggroTargetEntityId = target.clientEntID;
+        npc.aggroTargetToken = target.token;
 
         const attackRange = isRanged ? AILogic.RANGED_ATTACK_RANGE : AILogic.ATTACK_RANGE;
         const aggroRadius = isBoss
@@ -174,6 +186,8 @@ export class AILogic {
                 const now = Date.now();
                 if (!npc.nextAttack || now >= npc.nextAttack) {
                     npc.nextAttack = now + AILogic.ATTACK_COOLDOWN;
+                    npc.attackState = 'attacking';
+                    npc.animationState = 'attack';
                     
                     const damage = AILogic.BASE_NPC_DAMAGE; // Flattened for now
                     const powerId = 1693; // DefaultMobMelee
@@ -206,6 +220,7 @@ export class AILogic {
                     void CombatHandler.handlePowerHit(target, bbHit.toBuffer()).catch((error) => {
                         console.error('[AILogic] Failed to process NPC power hit:', error);
                     });
+                    DungeonSession.noteEntityState(levelScope, npc, AILogic.isBossLike(npc) ? 'boss:stateUpdated' : 'enemy:stateUpdated');
                 }
             } else {
                 // Chase Logic
@@ -222,6 +237,9 @@ export class AILogic {
                     npc.x += moveX;
                     npc.y += moveY;
                     npc.facingLeft = dx < 0;
+                    npc.attackState = 'chasing';
+                    npc.animationState = 'run';
+                    npc.bRunning = true;
 
                     // Broadcast Movement (0x07)
                     // Delta compression usually implies sending *changes* since last ack, 
@@ -244,6 +262,7 @@ export class AILogic {
                     bbMove.writeMethod15(false); // isAirborne
 
                     CombatHandler.broadcastEntityViewPacket(levelScope, npc, 0x07, bbMove.toBuffer(), [npc.id]);
+                    DungeonSession.noteEntityState(levelScope, npc, AILogic.isBossLike(npc) ? 'boss:stateUpdated' : 'enemy:stateUpdated');
                 }
             }
         }

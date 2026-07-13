@@ -1,6 +1,7 @@
 import { Character, UserAccount } from '../database/Database';
 import { Client } from './Client';
 import { normalizeCharacterKey, PartyGroup, PendingTeleport } from './SocialState';
+import type { AuthoritativeDungeonSessionState } from './DungeonSession';
 
 export interface PendingTransfer {
     character: Character;
@@ -188,6 +189,7 @@ export class GlobalState {
     static levelEntities: Map<string, Map<number, any>> = new Map();
     static levelQuestProgress: Map<string, SharedDungeonProgressState> = new Map();
     static dungeonCutscenes: Map<string, SharedDungeonCutsceneState> = new Map();
+    static dungeonSessions: Map<string, AuthoritativeDungeonSessionState> = new Map();
     static deadServerAuthorityHostilesByScope: Map<string, Map<string, DeadHostileTombstone>> = new Map();
     static lostAtSeaScenes: Map<string, LostAtSeaSceneState> = new Map();
     static lostAtSeaRunsByParty: Map<number, LostAtSeaRunRegistryEntry> = new Map();

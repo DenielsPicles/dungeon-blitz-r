@@ -20,6 +20,7 @@ import { markRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import { isEastWingLevel, isEastWingRequiredEnemy, logEastWingEnemyMutation } from '../core/EastWingEnemyDebug';
 import { LostAtSeaScene } from '../core/LostAtSeaScene';
+import { DungeonSession } from '../core/DungeonSession';
 
 export class EntityHandler {
     private static readonly CLIENT_SPAWN_LEVELS = new Set<string>([
@@ -51,7 +52,6 @@ export class EntityHandler {
     private static readonly MOUNT_SYNC_RETRY_DELAYS_MS = [0, 300, 1200, 2500, 4000];
     private static readonly CLIENT_SPAWN_JOINER_SEED_DELAYS_MS = [2500, 4500];
     private static readonly GOBLIN_RIVER_ROOM_SYNC_SKIP_LEVELS = new Set<string>([
-        'TutorialDungeon',
         'GoblinRiverDungeon',
         'GoblinRiverDungeonHard'
     ]);
@@ -62,6 +62,7 @@ export class EntityHandler {
         'JC_Mini1Hard',
         'JC_Mini2',
         'JC_Mini2Hard',
+        'TutorialDungeon',
         'TutorialBoat'
     ]);
     private static readonly FIRST_SIGHT_SERVER_AUTHORITY_HOSTILE_LEVELS = new Set<string>([
@@ -645,6 +646,7 @@ export class EntityHandler {
                 continue;
             }
             levelMap.set(npcId, entityProps);
+            DungeonSession.noteEntityState(levelScope, entityProps, 'enemy:spawned');
             if (isEastWingRequiredEnemy(levelScope, entityProps)) {
                 logEastWingEnemyMutation({
                     action: 'spawn_enemy',
@@ -4663,6 +4665,7 @@ export class EntityHandler {
 
     static sendInitialLevelEntities(client: Client, levelName: string): void {
         levelName = LevelConfig.normalizeLevelName(levelName) || levelName;
+        DungeonSession.getOrCreate(client);
         EntityHandler.ensureJcMini1PartySharedScope(client, levelName, 'send_initial_level_entities');
         console.log(`[EntityHandler] Sending initial entities for ${levelName} to ${client.character?.name}`);
         EntityHandler.dumpHostileAliasTable(getLevelScopeKey(levelName, client.levelInstanceId));
@@ -4839,6 +4842,7 @@ export class EntityHandler {
     }
 
     static removeOwnedEntities(client: Client): number[] {
+        DungeonSession.detachClient(client);
         const levelName = client.currentLevel;
         if (!levelName) {
             return [];

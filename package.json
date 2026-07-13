@@ -1,6 +1,6 @@
 {
     "name": "dungeon-blitz-r",
-    "version": "1.8.1",
+    "version": "1.9.0",
     "description": "Dungeon Blitz: R",
     "main": "index.js",
     "scripts": {
@@ -18,7 +18,9 @@
         "dev:with-discord": "concurrently -n GAME,RPC -c blue,magenta \"npm run dev\" \"npm run dev:discord-bridge\"",
         "reset-password": "cd src/server && npm run reset-password --",
         "export:lost-at-sea-spawns": "node src/server/tools/exportLostAtSeaEnemies.js",
-        "validate:lost-at-sea-spawns": "node src/server/tools/exportLostAtSeaEnemies.js --verify"
+        "validate:lost-at-sea-spawns": "node src/server/tools/exportLostAtSeaEnemies.js --verify",
+        "export:goblin-kidnappers-spawns": "node src/server/tools/exportGoblinKidnappersEnemies.js",
+        "test:goblin-kidnappers-authority": "cd src/server && ts-node --transpile-only test/goblin_kidnappers_server_authority_regression.ts"
     },
     "devDependencies": {
         "concurrently": "^10.0.3"

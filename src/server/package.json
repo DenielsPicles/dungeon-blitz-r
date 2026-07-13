@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -17,7 +17,9 @@
     "validate:east-wing-spawns": "node tools/exportTheEastWingEnemies.js",
     "validate:dungeon-spawns": "node tools/exportTheEastWingEnemies.js",
     "export:lost-at-sea-spawns": "node tools/exportLostAtSeaEnemies.js",
-    "validate:lost-at-sea-spawns": "node tools/exportLostAtSeaEnemies.js --verify"
+    "validate:lost-at-sea-spawns": "node tools/exportLostAtSeaEnemies.js --verify",
+    "export:goblin-kidnappers-spawns": "node tools/exportGoblinKidnappersEnemies.js",
+    "test:goblin-kidnappers-authority": "ts-node --transpile-only test/goblin_kidnappers_server_authority_regression.ts"
   },
   "keywords": [],
   "author": "",

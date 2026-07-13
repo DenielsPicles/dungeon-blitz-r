@@ -64,6 +64,7 @@ import {
     logEastWingProgressBlocked
 } from '../core/EastWingEnemyDebug';
 import { LOST_AT_SEA_ROOM_ID, LostAtSeaScene } from '../core/LostAtSeaScene';
+import { DungeonSession } from '../core/DungeonSession';
 
 const db = new JsonAdapter();
 
@@ -1275,7 +1276,6 @@ export class LevelHandler {
     static shouldSkipDungeonRoomProgressSync(levelName: string | null | undefined): boolean {
         const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
         return LevelHandler.usesAuthoritativeQuestProgress(normalizedLevel) ||
-            normalizedLevel === 'TutorialDungeon' ||
             normalizedLevel === 'TutorialDungeonHard' ||
             normalizedLevel === 'CraftTownTutorial';
     }
@@ -1294,9 +1294,15 @@ export class LevelHandler {
         const normalizedLevel = LevelConfig.normalizeLevelName(client.currentLevel) || client.currentLevel;
 
         if (normalizedLevel === 'TutorialDungeon' || normalizedLevel === 'TutorialDungeonHard') {
-            client.currentRoomId = 0;
-            client.startedRoomEvents.clear();
-            client.character.questTrackerState = LevelHandler.TUTORIAL_DUNGEON_INITIAL_PROGRESS;
+            const sessionState = DungeonSession.getOrCreate(client);
+            if (sessionState) {
+                client.currentRoomId = sessionState.currentRoomId;
+                client.character.questTrackerState = sessionState.progressPercent;
+            } else {
+                client.currentRoomId = 0;
+                client.startedRoomEvents.clear();
+                client.character.questTrackerState = LevelHandler.TUTORIAL_DUNGEON_INITIAL_PROGRESS;
+            }
             return;
         }
 
@@ -2959,17 +2965,22 @@ export class LevelHandler {
         return bb.toBuffer();
     }
 
-    private static cacheRoomId(client: Client, roomId: number): void {
+    private static cacheRoomId(client: Client, roomId: number): number {
         if (Number.isFinite(roomId) && roomId >= 0) {
             const previousRoomId = Number.isFinite(Number(client.currentRoomId))
                 ? Math.round(Number(client.currentRoomId))
                 : -1;
-            client.currentRoomId = roomId;
-            if (previousRoomId >= 0 && previousRoomId !== roomId) {
+            const authoritativeRoomId = DungeonSession.isAuthoritativeLevel(client.currentLevel)
+                ? DungeonSession.requestRoomChange(client, roomId)
+                : roomId;
+            client.currentRoomId = authoritativeRoomId;
+            if (previousRoomId >= 0 && previousRoomId !== authoritativeRoomId) {
                 PetHandler.armMountTravelProtection(client, 4000, true);
             }
-            LevelHandler.maybeStartTutorialDungeonTraversalTutorial(client, roomId);
+            LevelHandler.maybeStartTutorialDungeonTraversalTutorial(client, authoritativeRoomId);
+            return authoritativeRoomId;
         }
+        return roomId;
     }
 
     static isGoblinRiverBossIntroLocked(client: Client): boolean {
@@ -5246,6 +5257,8 @@ export class LevelHandler {
         if (client.character) {
             client.character.questTrackerState = progress;
         }
+        DungeonSession.updateProgress(levelScope, progress);
+        if (progress >= 100) DungeonSession.markCompleted(levelScope);
         noteDungeonRunCompletionProgress(client, progress);
         MissionHandler.maybeScheduleFullClearDungeonCompletionFromProgress(client, progress);
 
@@ -5278,7 +5291,7 @@ export class LevelHandler {
     static handlePlaySound(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod26();
         br.readMethod9();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
@@ -5294,7 +5307,7 @@ export class LevelHandler {
     static handleActionUpdate(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod9();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
             return;
@@ -5309,7 +5322,7 @@ export class LevelHandler {
     static handleRoomStateUpdate(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod9();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
             return;
@@ -5324,7 +5337,9 @@ export class LevelHandler {
     static handleRoomEventStart(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
+        DungeonSession.noteCutscene(getClientLevelScope(client), roomId, 'room', false);
+        DungeonSession.noteDialog(getClientLevelScope(client), roomId, 'room_dialog', false);
         br.readMethod15();
         LevelHandler.logEastWingState('eastwing-room-entry', client, roomId);
         const sharedCutsceneDecision = LevelHandler.beginSharedDungeonCutscene(client, roomId);
@@ -5399,7 +5414,7 @@ export class LevelHandler {
     static handleRoomInfoUpdate(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod9();
         br.readMethod26();
         br.readMethod9();
@@ -5417,11 +5432,13 @@ export class LevelHandler {
     static handleRoomClose(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         if (LevelHandler.holdEastWingIntroCloseBarrier(client, roomId, data)) {
             return;
         }
         const sharedCutsceneDecision = LevelHandler.finishSharedDungeonCutscene(client, roomId);
+        DungeonSession.noteCutscene(getClientLevelScope(client), roomId, 'room', true);
+        DungeonSession.noteDialog(getClientLevelScope(client), roomId, 'room_dialog', true);
         if (sharedCutsceneDecision !== 'not_shared') {
             LevelHandler.logDungeonCutsceneSync('room-close-decision', client, {
                 roomId,
@@ -5457,7 +5474,7 @@ export class LevelHandler {
     static handleRoomUnlock(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
 
         LevelHandler.relayToLevel(client, 0xAD, data);
     }
@@ -5465,7 +5482,7 @@ export class LevelHandler {
     static handleRoomBossInfo(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         const bossId = br.readMethod9();
         const bossName = br.readMethod26();
         br.readMethod9();
