@@ -258,7 +258,7 @@ export class TutorialDungeonMechanics {
             sourceRoom: authority.sourceRoom,
             sourceVar: authority.sourceVar,
             scripted: true,
-            serverOnlyObjective: true,
+            serverOnlyObjective: !authority.boss,
             tutorialDungeonAuthorityRole: authority.role,
             requiredForClear: Boolean(authority.requiredForCompletion),
             boss: Boolean(authority.boss),
@@ -412,19 +412,6 @@ export class TutorialDungeonMechanics {
         }
 
         return events;
-    }
-
-    static hasBossDefeated(levelScope: string | null | undefined): boolean {
-        return Boolean(TutorialDungeonMechanics.getState(levelScope)?.bossDefeated);
-    }
-
-    static hasAnnaFreed(levelScope: string | null | undefined): boolean {
-        return Boolean(TutorialDungeonMechanics.getState(levelScope)?.annaFreed);
-    }
-
-    static hasCompletionObjectives(levelScope: string | null | undefined): boolean {
-        const state = TutorialDungeonMechanics.getState(levelScope);
-        return Boolean(state?.bossDefeated && state?.annaFreed);
     }
 
     static markCanonicalDefeated(entity: any): void {

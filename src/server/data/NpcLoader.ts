@@ -89,7 +89,7 @@ export class NpcLoader {
             filtered = filtered.filter((npc) => !bakedNpcs.has(String(npc?.name ?? '')));
             const knownIds = new Set(filtered.map((npc) => Number(npc?.id ?? 0)));
             for (const npc of npcs) {
-                if (!TutorialDungeonMechanics.isAuthorityEntity(levelName, npc)) {
+                if (!TutorialDungeonMechanics.isCompletionBoss(levelName, npc)) {
                     continue;
                 }
                 const id = Number(npc?.id ?? 0);
