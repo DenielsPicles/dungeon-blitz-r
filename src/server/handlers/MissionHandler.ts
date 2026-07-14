@@ -265,6 +265,8 @@ export class MissionHandler {
     // These boss kills intentionally open a post-death room cutscene before the stats screen.
     private static readonly DUNGEONS_WITH_POST_DEATH_BOSS_CUTSCENE = new Set([
         'CraftTownTutorial',
+        'TutorialDungeon',
+        'TutorialDungeonHard',
         'AC_Mission6',
         'AC_Mission6Hard',
         'BT_Mission1',

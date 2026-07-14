@@ -6521,11 +6521,19 @@ export class CombatHandler {
             (entity as any)?.combatAuthorityToken ?? (entity as any)?.firstCombatAuthorityToken ?? 0
         ));
         const destroyedOwnerToken = Math.round(Number((entity as any)?.ownerToken ?? 0));
-        const authorityToken = combatAuthorityToken > 0
-            ? combatAuthorityToken
-            : destroyedOwnerToken > 0
-                ? destroyedOwnerToken
-            : (levelScope ? resolveSharedDungeonProgressAuthorityToken(levelScope) : 0);
+        // Completion is validated against the shared-progress authority. A
+        // non-leader can own combat authority after landing the boss kill, but
+        // routing completion back to that player is rejected later as
+        // `not_progress_authority` and the already-processed death never gets
+        // another completion attempt.
+        const sharedProgressAuthorityToken = levelScope
+            ? resolveSharedDungeonProgressAuthorityToken(levelScope)
+            : 0;
+        const authorityToken = sharedProgressAuthorityToken > 0
+            ? sharedProgressAuthorityToken
+            : combatAuthorityToken > 0
+                ? combatAuthorityToken
+                : destroyedOwnerToken;
         const authorityClient = authorityToken > 0 ? GlobalState.sessionsByToken.get(authorityToken) : null;
         const completionClient = authorityClient && areClientsInSameLevelScope(client, authorityClient)
             ? authorityClient

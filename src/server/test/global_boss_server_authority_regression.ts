@@ -10,6 +10,7 @@ import { NpcLoader } from '../data/NpcLoader';
 import { CombatHandler } from '../handlers/CombatHandler';
 import { EntityHandler } from '../handlers/EntityHandler';
 import { LevelHandler } from '../handlers/LevelHandler';
+import { MissionHandler } from '../handlers/MissionHandler';
 import { BitBuffer } from '../network/protocol/bitBuffer';
 import { BitReader } from '../network/protocol/bitReader';
 import { getLevelScopeKey } from '../core/LevelScope';
@@ -591,6 +592,94 @@ async function testGoblinKidnappersConcurrentCanonicalDamage(): Promise<void> {
     assert.ok(first.sentPackets.some((packet) => packet.id === 0x0D) && second.sentPackets.some((packet) => packet.id === 0x0D), 'both party members must receive the one canonical death/despawn');
 }
 
+async function testGoblinKidnappersNonLeaderBossCompletionRouting(): Promise<void> {
+    const leader = createFakeClient('TutorialDungeon', 'goblin-kidnappers-nonleader-boss-kill', 54104);
+    const member = createFakeClient('TutorialDungeon', 'goblin-kidnappers-nonleader-boss-kill', 54105);
+    attachPlayer(leader);
+    attachPlayer(member);
+    GlobalState.sessionsByToken.set(leader.token, leader as never);
+    GlobalState.sessionsByToken.set(member.token, member as never);
+
+    const partyId = 54100;
+    GlobalState.partyGroups.set(partyId, {
+        id: partyId,
+        leader: leader.character.name,
+        members: [leader.character.name, member.character.name],
+        locked: false
+    });
+    GlobalState.partyByMember.set(leader.character.name.toLowerCase(), partyId);
+    GlobalState.partyByMember.set(member.character.name.toLowerCase(), partyId);
+    EntityHandler.sendInitialLevelEntities(leader as never, 'TutorialDungeon');
+    EntityHandler.sendInitialLevelEntities(member as never, 'TutorialDungeon');
+
+    const scope = getLevelScopeKey('TutorialDungeon', leader.levelInstanceId);
+    const levelMap = GlobalState.levelEntities.get(scope);
+    const boss = Array.from(levelMap?.values() ?? []).find((entity) =>
+        EntityHandler.isServerAuthorityHostileEntity('TutorialDungeon', entity) &&
+        Boolean(entity.boss ?? entity.roomBoss ?? entity.isRoomBoss)
+    );
+    assert.ok(boss, 'Goblin Kidnappers must expose Tag Ugo as a canonical boss');
+
+    const bossRoomId = Math.max(1, Math.round(Number(boss.roomBossRoomId ?? boss.roomId ?? 1)));
+    leader.currentRoomId = bossRoomId;
+    member.currentRoomId = bossRoomId;
+    const memberLocalBossId = 841501;
+    EntityHandler.handleEntityFullUpdate(
+        member as never,
+        buildHostileFullUpdate(
+            memberLocalBossId,
+            String(boss.name),
+            Number(boss.x),
+            Number(boss.y),
+            Number(boss.roomId)
+        )
+    );
+    assert.equal(EntityHandler.resolveEntityAlias(member as never, memberLocalBossId), boss.id);
+
+    await CombatHandler.handlePowerCast(member as never, buildPowerCastPayload(member.clientEntID));
+    await CombatHandler.handlePowerHit(
+        member as never,
+        buildPowerHitPayload(memberLocalBossId, member.clientEntID, Math.max(1, Number(boss.hp ?? boss.maxHp ?? 1)) + 1)
+    );
+
+    assert.equal(Boolean(boss.dead), true, 'the non-leader kill must commit Tag Ugo death');
+    assert.equal(
+        String((leader as any).pendingDungeonCompletionScope ?? ''),
+        scope,
+        'boss completion must be routed to the party leader/shared-progress authority'
+    );
+    assert.equal(
+        Boolean((leader as any).pendingDungeonCompletionWaitForCutsceneEnd),
+        true,
+        'Goblin Kidnappers completion must wait for the post-death cinematic to close'
+    );
+    assert.notEqual(
+        String((member as any).pendingDungeonCompletionScope ?? ''),
+        scope,
+        'the non-authority killer must not own the shared completion flush'
+    );
+
+    const pendingTimer = (leader as any).pendingDungeonCompletionTimer as NodeJS.Timeout | null;
+    if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        (leader as any).pendingDungeonCompletionTimer = null;
+    }
+
+    const originalFlush = (MissionHandler as any).flushPendingDungeonCompletion;
+    let flushedToken = 0;
+    (MissionHandler as any).flushPendingDungeonCompletion = async (client: FakeClient): Promise<void> => {
+        flushedToken = client.token;
+    };
+    try {
+        MissionHandler.noteDungeonCutsceneStart(leader as never, bossRoomId);
+        MissionHandler.noteDungeonCutsceneEnd(leader as never, bossRoomId);
+        assert.equal(flushedToken, leader.token, 'cinematic end must release the leader completion flush');
+        assert.equal(Boolean((leader as any).pendingDungeonCompletionWaitForCutsceneEnd), false);
+    } finally {
+        (MissionHandler as any).flushPendingDungeonCompletion = originalFlush;
+    }
+}
+
 function testMultiBossProxyIdentity(): void {
     const levelName = 'SD_Mission4';
     const client = createFakeClient(levelName, 'global-boss-multi-identity', 53003);
@@ -623,6 +712,7 @@ async function main(): Promise<void> {
     const sessionsByToken = new Map(GlobalState.sessionsByToken);
     const partyByMember = new Map(GlobalState.partyByMember);
     const partyGroups = new Map(GlobalState.partyGroups);
+    const levelQuestProgress = new Map(GlobalState.levelQuestProgress);
     ensureDataLoaded();
     try {
         GlobalState.levelEntities.clear();
@@ -653,7 +743,15 @@ async function main(): Promise<void> {
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
+        GlobalState.levelQuestProgress.clear();
         await testGoblinKidnappersConcurrentCanonicalDamage();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        GlobalState.levelQuestProgress.clear();
+        await testGoblinKidnappersNonLeaderBossCompletionRouting();
 
         console.log('global_boss_server_authority_regression: ok');
     } finally {
@@ -661,6 +759,7 @@ async function main(): Promise<void> {
         GlobalState.sessionsByToken = sessionsByToken;
         GlobalState.partyByMember = partyByMember;
         GlobalState.partyGroups = partyGroups;
+        GlobalState.levelQuestProgress = levelQuestProgress;
     }
 }
 
