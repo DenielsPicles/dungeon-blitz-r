@@ -16,7 +16,7 @@ import {
     isValidRegistrationPassword,
     normalizeAccountIdentifier
 } from '../auth/PasswordAuth';
-import { LoginHandler } from '../handlers/LoginHandler';
+import { CONCURRENT_ACCOUNT_EMAIL_MESSAGE, LoginHandler } from '../handlers/LoginHandler';
 
 function resolveContentDir(relativeContentPath: string): string {
     const candidates = [
@@ -639,6 +639,22 @@ try {
                 console.log(`[DiscordOAuth] Linked Discord account to ${result.account.email}`);
                 res.type('text/html').send(
                     this.renderDiscordOAuthPage('Discord Linked', 'Discord linked successfully. Return to the game.')
+                );
+                return;
+            }
+
+            const activeConflict = await LoginHandler.findActiveAccountIdentityConflict(result.account);
+            if (activeConflict) {
+                console.warn(
+                    `[DiscordOAuth] Login rejected for ${result.account.email}: active session already uses this account email identity`
+                );
+                res.status(409).type('text/html').send(
+                    this.renderDiscordOAuthPage(
+                        'Account Already Open',
+                        CONCURRENT_ACCOUNT_EMAIL_MESSAGE,
+                        true,
+                        true
+                    )
                 );
                 return;
             }

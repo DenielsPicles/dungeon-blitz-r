@@ -576,6 +576,8 @@ export class Client {
                 ? this.craftTownHostCharacter ?? undefined
                 : undefined,
             userId: snapshot.userId,
+            account: this.account ?? undefined,
+            accountEmail: this.account?.email,
             targetLevel: currentLevel,
             levelInstanceId: this.levelInstanceId,
             previousLevel,

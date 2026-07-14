@@ -20,6 +20,7 @@ import {
 const INVALID_CREDENTIALS_MESSAGE = "Invalid email or password";
 const DISCORD_BOOTSTRAP_REQUIRED_MESSAGE = "Use Discord login first to create or sync this account.";
 const PASSWORD_NOT_SET_MESSAGE = "Set a password before using password login.";
+export const CONCURRENT_ACCOUNT_EMAIL_MESSAGE = "You already have an account open with this email address.";
 
 interface LoginPayload {
     email: string;
@@ -82,6 +83,57 @@ export class LoginHandler {
         client.character = null;
     }
 
+    public static async findActiveAccountIdentityConflict(
+        account: UserAccount,
+        excludedClient?: Client | null
+    ): Promise<Client | true | null> {
+        const accountUserId = Math.max(0, Math.round(Number(account.user_id ?? 0)));
+        for (const session of GlobalState.getOpenClients()) {
+            if (session === excludedClient) {
+                continue;
+            }
+
+            const sessionUserId = Math.max(0, Math.round(Number(session.userId ?? 0)));
+            if (accountUserId > 0 && sessionUserId === accountUserId) {
+                return session;
+            }
+
+            if (GlobalState.accountsShareIdentity(session.account, account)) {
+                return session;
+            }
+
+            if (sessionUserId > 0) {
+                const sessionAccount = await LoginHandler.db.getAccountById(sessionUserId);
+                if (GlobalState.accountsShareIdentity(sessionAccount, account)) {
+                    return session;
+                }
+            }
+        }
+
+        for (const entry of GlobalState.pendingWorld.values()) {
+            if (accountUserId > 0 && entry.userId === accountUserId) {
+                return true;
+            }
+
+            if (GlobalState.accountsShareIdentity(entry.account, account)) {
+                return true;
+            }
+
+            if (entry.accountEmail && GlobalState.accountsShareIdentity({ email: entry.accountEmail }, account)) {
+                return true;
+            }
+
+            if (entry.userId > 0) {
+                const pendingAccount = await LoginHandler.db.getAccountById(entry.userId);
+                if (GlobalState.accountsShareIdentity(pendingAccount, account)) {
+                    return true;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private static async completeAuthentication(
         client: Client,
         account: UserAccount,
@@ -89,6 +141,10 @@ export class LoginHandler {
         resetForLoginCycle: boolean = false,
         sendCharacters: boolean = true
     ): Promise<void> {
+        if (await LoginHandler.rejectIfAccountIdentityAlreadyOpen(client, account)) {
+            return;
+        }
+
         if (resetForLoginCycle) {
             await client.resetForLoginCycle(reason);
         }
@@ -108,6 +164,21 @@ export class LoginHandler {
         if (sendCharacters) {
             LoginHandler.sendCharacterList(client);
         }
+    }
+
+    private static async rejectIfAccountIdentityAlreadyOpen(client: Client, account: UserAccount): Promise<boolean> {
+        const activeConflict = await LoginHandler.findActiveAccountIdentityConflict(account, client);
+        if (!activeConflict) {
+            return false;
+        }
+
+        LoginHandler.clearFailedAuthState(client);
+        console.warn(
+            `[Login] Authentication rejected for ${account.email}: active session already uses this account email identity`
+        );
+        LoginHandler.sendPopup(client, CONCURRENT_ACCOUNT_EMAIL_MESSAGE, false);
+        LoginHandler.issueChallenge(client);
+        return true;
     }
 
     private static scheduleDiscordOAuthCharacterListRetry(client: Client, account: UserAccount): void {
@@ -185,6 +256,11 @@ export class LoginHandler {
             return;
         }
 
+        const existingAccount = await LoginHandler.db.getAccount(email);
+        if (existingAccount && await LoginHandler.rejectIfAccountIdentityAlreadyOpen(client, existingAccount)) {
+            return;
+        }
+
         if (!isValidRegistrationPassword(password)) {
             LoginHandler.clearFailedAuthState(client);
             console.warn(`[Login] Registration rejected for ${email}: password failed validation`);
@@ -194,7 +270,6 @@ export class LoginHandler {
 
         console.log(`[Login] Set Password: ${email}`);
 
-        const existingAccount = await LoginHandler.db.getAccount(email);
         if (!existingAccount) {
             LoginHandler.rejectLogin(
                 client,

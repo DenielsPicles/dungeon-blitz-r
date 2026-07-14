@@ -3,7 +3,7 @@ import { strict as assert } from 'assert';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
-import { LoginHandler } from '../handlers/LoginHandler';
+import { CONCURRENT_ACCOUNT_EMAIL_MESSAGE, LoginHandler } from '../handlers/LoginHandler';
 import { JsonAdapter } from '../database/JsonAdapter';
 import { GlobalState } from '../core/GlobalState';
 import { BitBuffer } from '../network/protocol/bitBuffer';
@@ -121,6 +121,10 @@ function getLastPopupMessage(client: FakeClient): string {
     const popup = [...client.sentPackets].reverse().find((packet) => packet.id === 0x1B);
     assert.ok(popup, 'failure popup should be sent');
     return new BitReader(popup!.payload).readMethod13();
+}
+
+function getPopupCount(client: FakeClient): number {
+    return client.sentPackets.filter((packet) => packet.id === 0x1B).length;
 }
 
 function assertLoginFailed(client: FakeClient, message: string): void {
@@ -271,6 +275,65 @@ async function testPasswordLoginAllowsPasswordOnlyAccount(accountsPath: string, 
     assert.equal(client.account.email, 'legacy@example.com', 'password-only login should load the account');
     assert.deepEqual(client.characters, [{ name: 'LegacyHero', class: 'mage', gender: 'male', level: 1 }]);
     assert.equal(client.sentPackets.some((packet) => packet.id === 0x15), true, 'password-only login should send character list');
+}
+
+async function testConcurrentEmailIdentityFails(accountsPath: string, savesDir: string): Promise<void> {
+    const accounts = await readAccounts(accountsPath);
+    accounts.push({
+        email: 'active-primary@example.com',
+        emailAliases: ['shared-gmail@example.com'],
+        user_id: 6,
+        ...(await hashPlaintextPasswordForClient('active-password'))
+    });
+    accounts.push({
+        email: 'second-primary@example.com',
+        user_id: 7,
+        discordEmail: 'shared-gmail@example.com',
+        ...(await hashPlaintextPasswordForClient('second-password'))
+    });
+    await fs.writeFile(accountsPath, JSON.stringify(accounts, null, 2));
+    await fs.writeFile(path.join(savesDir, '6.json'), JSON.stringify({
+        user_id: 6,
+        characters: [{ name: 'AlreadyPlaying', class: 'warrior', gender: 'male', level: 1 }]
+    }, null, 2));
+    await fs.writeFile(path.join(savesDir, '7.json'), JSON.stringify({
+        user_id: 7,
+        characters: [{ name: 'SecondHero', class: 'mage', gender: 'female', level: 1 }]
+    }, null, 2));
+
+    const activeClient = createFakeClient('127.0.0.2');
+    activeClient.userId = 6;
+    activeClient.account = { email: 'active-primary@example.com', user_id: 6 };
+    activeClient.authenticated = true;
+    activeClient.character = { name: 'AlreadyPlaying' };
+    GlobalState.clients.add(activeClient as any);
+
+    try {
+        const secondClient = createFakeClient('127.0.0.3');
+        await LoginHandler.handleLoginAuthenticate(
+            secondClient as any,
+            buildLoginPacket('second-primary@example.com', 'second-password')
+        );
+
+        assertLoginFailed(secondClient, 'concurrent shared Gmail identity login');
+        assert.equal(getLastPopupMessage(secondClient), CONCURRENT_ACCOUNT_EMAIL_MESSAGE);
+
+        await LoginHandler.handleLoginAuthenticate(
+            secondClient as any,
+            buildLoginPacket('second-primary@example.com', 'second-password')
+        );
+        assert.equal(getPopupCount(secondClient), 2, 'repeated login button presses should resend the warning popup');
+        assert.equal(getLastPopupMessage(secondClient), CONCURRENT_ACCOUNT_EMAIL_MESSAGE);
+
+        await LoginHandler.handleLoginCreate(
+            secondClient as any,
+            buildLoginPacket('second-primary@example.com', 'x')
+        );
+        assert.equal(getPopupCount(secondClient), 3, 'create button presses should also resend the active-email warning popup');
+        assert.equal(getLastPopupMessage(secondClient), CONCURRENT_ACCOUNT_EMAIL_MESSAGE);
+    } finally {
+        GlobalState.clients.delete(activeClient as any);
+    }
 }
 
 async function testDiscordLinkedAccountWithoutHashFails(adapter: JsonAdapter): Promise<void> {
@@ -437,6 +500,7 @@ async function main(): Promise<void> {
         await testRetryAfterInvalidPassword();
         await testUnknownAndEmptyPasswordFail();
         await testPasswordLoginAllowsPasswordOnlyAccount(accountsPath, savesDir);
+        await testConcurrentEmailIdentityFails(accountsPath, savesDir);
         await testDiscordLinkedAccountWithoutHashFails(LoginHandler.db);
         await testAliasResetPreservesSave(accountsPath, savesDir, expectedEmail);
         await testPendingDiscordOAuthLoginDelaysCharacterListAfterVersion(accountsPath, savesDir);
