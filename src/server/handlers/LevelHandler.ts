@@ -5440,6 +5440,7 @@ export class LevelHandler {
             canonicalIsDefeatState &&
             !Boolean(ent.questDefeatProcessed)
         ) {
+            const levelScope = getClientLevelScope(client);
             const shouldProcessMissionProgress = MissionHandler.shouldWaitForEnemyKillStateMissionProgress(client, ent);
             const shouldProcessDungeonCompletion = MissionHandler.shouldProcessEnemyKillStateDungeonCompletion(client, ent);
             if (shouldProcessMissionProgress || shouldProcessDungeonCompletion) {
@@ -5448,11 +5449,10 @@ export class LevelHandler {
                     LevelHandler.deferMissionWork(
                         client,
                         'enemy defeat mission progress',
-                        () => MissionHandler.handleEnemyDefeatMissionProgress(client, ent)
+                        () => MissionHandler.handleEnemyDefeatMissionProgressForScope(client, levelScope, ent)
                     );
                 }
 
-                const levelScope = getClientLevelScope(client);
                 const ownerToken = Math.round(Number(ent.ownerToken ?? 0));
                 const authorityToken = ownerToken > 0
                     ? ownerToken

@@ -4462,7 +4462,7 @@ export class CombatHandler {
         CombatHandler.fireAndForgetMissionWork(
             client,
             'enemy defeat mission progress',
-            () => MissionHandler.handleEnemyDefeatMissionProgress(client, entity)
+            () => MissionHandler.handleEnemyDefeatMissionProgressForScope(client, levelScope, entity)
         );
 
         CombatHandler.observeDungeonCompletion(client, entity, 'forced dungeon boss completion');

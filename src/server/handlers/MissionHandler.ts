@@ -992,6 +992,34 @@ export class MissionHandler {
     }
 
     static shouldWaitForEnemyKillStateMissionProgress(client: Client, destroyedEntity: any): boolean {
+        if (MissionHandler.hasActiveEnemyKillMissionProgress(client, destroyedEntity)) {
+            return true;
+        }
+
+        const levelScope = getClientLevelScope(client);
+        if (!levelScope || !LevelConfig.isDungeonLevel(getScopeLevelName(levelScope))) {
+            return false;
+        }
+
+        for (const other of GlobalState.sessionsByToken.values()) {
+            if (
+                other === client ||
+                !other.playerSpawned ||
+                !other.character ||
+                getClientLevelScope(other) !== levelScope
+            ) {
+                continue;
+            }
+
+            if (MissionHandler.hasActiveEnemyKillMissionProgress(other, destroyedEntity)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static hasActiveEnemyKillMissionProgress(client: Client, destroyedEntity: any): boolean {
         if (!client.character) {
             return false;
         }
@@ -1035,6 +1063,38 @@ export class MissionHandler {
         }
 
         return false;
+    }
+
+    static async handleEnemyDefeatMissionProgressForScope(
+        client: Client,
+        levelScope: string,
+        destroyedEntity: any
+    ): Promise<void> {
+        if (!levelScope || !LevelConfig.isDungeonLevel(getScopeLevelName(levelScope))) {
+            await MissionHandler.handleEnemyDefeatMissionProgress(client, destroyedEntity);
+            return;
+        }
+
+        const recipients = new Set<Client>();
+        if (client.character && client.playerSpawned && getClientLevelScope(client) === levelScope) {
+            recipients.add(client);
+        }
+        for (const other of GlobalState.sessionsByToken.values()) {
+            if (
+                !other.playerSpawned ||
+                !other.character ||
+                getClientLevelScope(other) !== levelScope
+            ) {
+                continue;
+            }
+            recipients.add(other);
+        }
+
+        await Promise.all(
+            [...recipients].map((recipient) =>
+                MissionHandler.handleEnemyDefeatMissionProgress(recipient, destroyedEntity)
+            )
+        );
     }
 
     static async handleEnemyDefeatMissionProgress(client: Client, destroyedEntity: any): Promise<void> {
