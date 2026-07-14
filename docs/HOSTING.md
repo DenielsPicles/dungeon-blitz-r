@@ -12,12 +12,13 @@ npm run build
 npm run multiplayer
 ```
 
-Google Cloud firewall rules must allow inbound TCP traffic on port `80` for
-the game page and OAuth return, `8080` for the game socket, and `843` for the
-Flash socket policy server. Players launch the shared client from:
+Google Cloud firewall rules must allow inbound TCP traffic on port `8000` for
+the game page and OAuth return and `8080` for the game socket. Socket policy
+is served inline on `8080`, so the server does not need root privileges or a
+separate privileged `843` listener. Players launch the shared client from:
 
 ```text
-http://34.135.182.35/
+http://34.135.182.35:8000/
 ```
 
 The launcher is configured to open this address. Discord and MongoDB secrets
@@ -78,7 +79,7 @@ Password-created accounts are disabled for new users. Players must bootstrap or 
 Required `.env` values:
 
 ```sh
-PUBLIC_BASE_URL=http://34.135.182.35
+PUBLIC_BASE_URL=http://34.135.182.35:8000
 DISCORD_CLIENT_ID=your_discord_application_id
 DISCORD_CLIENT_SECRET=your_discord_client_secret
 DISCORD_REDIRECT_URI=https://discord-github-assistant-bot.vercel.app/api/discord-oauth-callback

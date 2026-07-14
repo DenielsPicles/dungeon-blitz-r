@@ -3,11 +3,11 @@ const GOOGLE_CLOUD_HOST = '34.135.182.35';
 function applyMultiplayerServerEnv(env = process.env) {
     env.MULTIPLAYER_MODE = 'true';
     env.MULTIPLAYER_BASE_IP = env.MULTIPLAYER_BASE_IP || GOOGLE_CLOUD_HOST;
-    env.PUBLIC_BASE_URL = env.PUBLIC_BASE_URL || `http://${env.MULTIPLAYER_BASE_IP}`;
-    env.STATIC_PORT = env.STATIC_PORT || '80';
+    env.PUBLIC_BASE_URL = env.PUBLIC_BASE_URL || `http://${env.MULTIPLAYER_BASE_IP}:8000`;
+    env.STATIC_PORT = env.STATIC_PORT || '8000';
     env.GAME_PORT = env.GAME_PORT || '8080';
-    env.POLICY_PORT = env.POLICY_PORT || '843';
-    env.ENABLE_POLICY_SERVER = env.ENABLE_POLICY_SERVER || 'true';
+    env.POLICY_PORT = env.POLICY_PORT || '8843';
+    env.ENABLE_POLICY_SERVER = env.ENABLE_POLICY_SERVER || 'false';
 }
 
 function startMultiplayerServer() {

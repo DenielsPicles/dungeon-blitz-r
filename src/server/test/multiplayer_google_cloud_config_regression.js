@@ -10,11 +10,11 @@ applyMultiplayerServerEnv(defaults);
 assert.deepEqual(defaults, {
     MULTIPLAYER_MODE: 'true',
     MULTIPLAYER_BASE_IP: GOOGLE_CLOUD_HOST,
-    PUBLIC_BASE_URL: `http://${GOOGLE_CLOUD_HOST}`,
-    STATIC_PORT: '80',
+    PUBLIC_BASE_URL: `http://${GOOGLE_CLOUD_HOST}:8000`,
+    STATIC_PORT: '8000',
     GAME_PORT: '8080',
-    POLICY_PORT: '843',
-    ENABLE_POLICY_SERVER: 'true'
+    POLICY_PORT: '8843',
+    ENABLE_POLICY_SERVER: 'false'
 });
 
 const overrides = {
