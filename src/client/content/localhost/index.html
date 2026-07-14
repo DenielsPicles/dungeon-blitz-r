@@ -54,41 +54,6 @@
       padding-top: 20vh;
     }
 
-    #discord-login-container {
-      position: absolute;
-      top: 14px;
-      right: 14px;
-      z-index: 10;
-      display: none;
-      font-family: sans-serif;
-    }
-
-    #discord-login-button {
-      border: 0;
-      background: #5865f2;
-      color: #fff;
-      font: inherit;
-      font-weight: 700;
-      padding: 9px 12px;
-      cursor: pointer;
-    }
-
-    #discord-login-button:disabled {
-      background: #7d8491;
-      cursor: not-allowed;
-    }
-
-    #discord-login-status {
-      margin-top: 6px;
-      max-width: 260px;
-      color: #fff;
-      background: rgba(0, 0, 0, 0.7);
-      padding: 6px 8px;
-      font-size: 12px;
-      line-height: 1.35;
-      display: none;
-    }
-
     a { color: #6cf; }
   </style>
 </head>
@@ -96,11 +61,6 @@
 <body>
 
   <div id="game-container"></div>
-
-  <div id="discord-login-container">
-    <button id="discord-login-button" type="button">Discord ile Giri&#351; Yap</button>
-    <div id="discord-login-status"></div>
-  </div>
 
   <div id="flash-hint">
     <div>
@@ -140,18 +100,14 @@
     const localBridgeBaseUrl = "http://127.0.0.1:47631";
     const selfPresenceUrl = "/api/presence/self";
     const discordJoinUrl = "/api/presence/discord-join";
-    const discordConfigUrl = "/api/auth/discord/config";
     const discordPendingUrl = "/api/auth/discord/pending";
     const presencePollMs = 4000;
     const localDiscordBridgeEnabled =
       window.location.protocol === "http:" || window.location.protocol === "https:";
     let lastPresenceHash = "";
-    let discordAuthUrl = "/auth/discord";
-    let discordClientAuthUrl = "";
     let discordPendingPollTimer = 0;
     let discordPendingPollUntil = 0;
     let discordReloadNonce = 0;
-    let discordClientLaunchFrame = null;
 
     function showFallback() {
       document.getElementById("flash-hint").style.display = "none";
@@ -236,6 +192,10 @@
 
     function showDiscordStatus(message) {
       const status = document.getElementById("discord-login-status");
+      if (!status) {
+        console.log("[DungeonBlitzHost]", message);
+        return;
+      }
       status.textContent = message;
       status.style.display = "block";
     }
@@ -308,72 +268,6 @@
       setTimeout(pollDiscordPendingLogin, 1000);
     }
 
-    function launchDiscordClient(url) {
-      if (!discordClientLaunchFrame) {
-        discordClientLaunchFrame = document.createElement("iframe");
-        discordClientLaunchFrame.style.display = "none";
-        discordClientLaunchFrame.setAttribute("aria-hidden", "true");
-        document.body.appendChild(discordClientLaunchFrame);
-      }
-
-      discordClientLaunchFrame.src = url;
-    }
-
-    async function initializeDiscordLoginButton() {
-      const container = document.getElementById("discord-login-container");
-      const button = document.getElementById("discord-login-button");
-      try {
-        const response = await fetch(discordConfigUrl, {
-          cache: "no-store",
-          credentials: "same-origin"
-        });
-        if (!response.ok) {
-          return;
-        }
-
-        const config = await response.json();
-        if (!config || !config.configured) {
-          console.log("[DungeonBlitzHost] Discord OAuth login is disabled");
-          return;
-        }
-
-        discordAuthUrl = config.mode === "link" && config.linkUrl ? config.linkUrl : config.authUrl || "/auth/discord";
-        discordClientAuthUrl = config.mode === "link" && config.clientLinkUrl
-          ? config.clientLinkUrl
-          : config.clientAuthUrl || "";
-        button.innerHTML = config.mode === "link" ? "Discord Hesab&#305;n&#305; Ba&#287;la" : "Discord ile Giri&#351; Yap";
-        container.style.display = "block";
-        console.log("[DungeonBlitzHost] Discord OAuth URL", new URL(discordAuthUrl, window.location.origin).toString());
-        if (discordClientAuthUrl) {
-          console.log("[DungeonBlitzHost] Discord client OAuth URL", new URL(discordClientAuthUrl, window.location.origin).toString());
-        }
-      } catch (_error) {
-        // Discord OAuth is optional; keep the Flash game usable when config cannot load.
-      }
-    }
-
-    function openDiscordLogin() {
-      const absoluteUrl = new URL(discordAuthUrl, window.location.origin).toString();
-      const absoluteClientUrl = discordClientAuthUrl
-        ? new URL(discordClientAuthUrl, window.location.origin).toString()
-        : "";
-      try {
-        startDiscordPendingLoginPoll();
-        if (absoluteClientUrl) {
-          launchDiscordClient(absoluteClientUrl);
-          return;
-        }
-
-        const popup = window.open(absoluteUrl, "_blank", "noopener,noreferrer");
-        if (!popup) {
-          window.location.href = absoluteUrl;
-        }
-      } catch (_error) {
-        stopDiscordPendingLoginPoll();
-        showDiscordStatus(`Open this URL to continue: ${absoluteUrl}`);
-      }
-    }
-
     function embedDungeonBlitzSwf(forceReload) {
       const container = document.getElementById("game-container");
       const fallback = document.getElementById("fallback");
@@ -418,11 +312,8 @@
     }
 
     embedDungeonBlitzSwf();
-    initializeDiscordLoginButton();
     discordPendingPollUntil = Date.now() + 5000;
     setTimeout(pollDiscordPendingLogin, 500);
-    setInterval(initializeDiscordLoginButton, 10000);
-    document.getElementById("discord-login-button").addEventListener("click", openDiscordLogin);
     window.addEventListener("storage", function (event) {
       if (event.key !== "db_discord_oauth_complete") {
         return;
