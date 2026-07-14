@@ -77,8 +77,7 @@ export class EntityHandler {
     private static readonly LOST_AT_SEA_KRAKEN_PROXY_NAMES = new Set<string>([
         'introkraken',
         'krakenmain',
-        'krakenheavy',
-        'colossalwarkraken'
+        'krakenheavy'
     ]);
     private static readonly CANONICAL_VISIBLE_PROXY_MATCH_MAX_DISTANCE_SQ = 400 * 400;
     static readonly SERVER_AUTHORITY_ENTITY_LEVEL = 50;
@@ -130,8 +129,11 @@ export class EntityHandler {
 
     static hasServerSpawnedHostiles(levelName: string | null | undefined): boolean {
         const normalizedLevel = LevelConfig.normalizeLevelName(getScopeLevelName(String(levelName ?? '')));
-        return EntityHandler.usesServerAuthorityHostiles(normalizedLevel) ||
-            DungeonSpawnLoader.hasLevel(normalizedLevel);
+        // Keep ordinary dungeon bosses on the original Flash/client combat
+        // path. Generated boss metadata is still available for classification
+        // and tooling, but only explicitly supported multiplayer dungeons may
+        // replace their client actors with server-authority proxies.
+        return EntityHandler.usesServerAuthorityHostiles(normalizedLevel);
     }
 
     static markRejectedServerAuthorityLocalEntityId(client: Client, levelScope: string | null | undefined, entityId: number): void {
@@ -880,23 +882,6 @@ export class EntityHandler {
         return normalized.endsWith('hard') ? normalized.slice(0, -4) : normalized;
     }
 
-    private static getServerAuthorityProxyNames(entity: any): Set<string> {
-        return new Set(
-            [
-                entity?.name,
-                entity?.EntName,
-                entity?.entName,
-                entity?.roomBossName,
-                entity?.displayName,
-                entity?.DisplayName,
-                entity?.characterName,
-                entity?.character_name
-            ]
-                .map((value) => EntityHandler.normalizeServerAuthorityProxyName(value))
-                .filter((value) => value.length > 0)
-        );
-    }
-
     private static isLostAtSeaKrakenProxy(levelName: string | null | undefined, entity: any): boolean {
         if ((LevelConfig.normalizeLevelName(getScopeLevelName(String(levelName ?? ''))) || '') !== 'TutorialBoat') {
             return false;
@@ -1021,12 +1006,7 @@ export class EntityHandler {
             if (!EntityHandler.isServerAuthorityHostileEntity(levelName, candidate)) {
                 continue;
             }
-            // Flash frequently replaces the authored entity type with the
-            // room-boss display name in its full-update cue (for example
-            // GreatNephit -> Nephit). Treat those exported display identities
-            // as aliases, then keep the existing position tie-breaker so
-            // multi-stage or same-name bosses resolve to the correct actor.
-            if (!EntityHandler.getServerAuthorityProxyNames(candidate).has(proxyName)) {
+            if (EntityHandler.normalizeServerAuthorityProxyName(candidate.name) !== proxyName) {
                 continue;
             }
 
