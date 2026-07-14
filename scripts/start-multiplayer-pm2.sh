@@ -63,9 +63,9 @@ readonly PACKAGE_LOCK_STAMP="${SERVER_ROOT}/node_modules/.pm2-package-lock.sha25
 
 if [[ ! -d "${SERVER_ROOT}/node_modules" ]] ||
     [[ ! -f "${PACKAGE_LOCK_STAMP}" ]] ||
-    [[ "$(<"${PACKAGE_LOCK_STAMP}" 2>/dev/null || true)" != "${PACKAGE_LOCK_HASH}" ]]; then
+    [[ "$(cat "${PACKAGE_LOCK_STAMP}" 2>/dev/null || true)" != "${PACKAGE_LOCK_HASH}" ]]; then
     echo "[PM2Deploy] Installing server dependencies."
-    npm ci --prefix "${SERVER_ROOT}"
+    npm ci --include=dev --prefix "${SERVER_ROOT}"
     printf '%s\n' "${PACKAGE_LOCK_HASH}" > "${PACKAGE_LOCK_STAMP}"
 else
     echo "[PM2Deploy] Server dependencies already match package-lock.json."

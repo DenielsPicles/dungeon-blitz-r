@@ -20,6 +20,10 @@ module.exports = {
             env: {
                 NODE_ENV: 'production',
                 DUNGEON_BLITZ_BRANCH: 'multiplayer'
+            },
+            env_production: {
+                NODE_ENV: 'production',
+                DUNGEON_BLITZ_BRANCH: 'multiplayer'
             }
         }
     ]
