@@ -6,7 +6,9 @@ import { GlobalState } from '../core/GlobalState';
 import { LevelConfig } from '../core/LevelConfig';
 import { getClientLevelScope } from '../core/LevelScope';
 import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
+import { DungeonCompletionSystem } from '../core/DungeonCompletionSystem';
 import { MissionLoader } from '../data/MissionLoader';
+import { NpcLoader } from '../data/NpcLoader';
 import { MissionID } from '../data/runtime';
 import { LevelHandler } from '../handlers/LevelHandler';
 import { MissionHandler } from '../handlers/MissionHandler';
@@ -36,10 +38,8 @@ type FakeClient = {
     pendingDungeonCompletionNotBeforeAt: number;
     pendingDungeonCompletionSettleMs: number;
     pendingDungeonCompletionPayload: Buffer | null;
-    pendingDungeonCompletionForceSharedScope: string;
     pendingDungeonCompletionTimer: NodeJS.Timeout | null;
     pendingDungeonCompletionFlushActive: boolean;
-    pendingDungeonCompletionWaitForCutsceneEnd: boolean;
     activeDungeonCutsceneScope: string;
     activeDungeonCutsceneRoomId: number;
     activeDungeonCutsceneJoinedAtDialogIndex: number;
@@ -48,10 +48,6 @@ type FakeClient = {
     lastDungeonCutsceneStartAt: number;
     lastDungeonCutsceneEndScope: string;
     lastDungeonCutsceneEndAt: number;
-    forcedDungeonCompletionScope: string;
-    finalizingDungeonCompletionScope: string;
-    completedDungeonCompletionScope: string;
-    completedDungeonCompletionSentAt: number;
     armPendingTransferGrace(): void;
     send(id: number, payload: Buffer): void;
     sendBitBuffer(id: number, bb: BitBuffer): void;
@@ -68,6 +64,7 @@ function ensureDataLoaded(): void {
     if (Object.keys(GameData.ENTTYPES).length === 0) {
         GameData.load(dataDir);
     }
+    NpcLoader.load(dataDir);
 }
 
 function createFakeClient(name: string, token: number): FakeClient {
@@ -110,10 +107,8 @@ function createFakeClient(name: string, token: number): FakeClient {
         pendingDungeonCompletionNotBeforeAt: 0,
         pendingDungeonCompletionSettleMs: 0,
         pendingDungeonCompletionPayload: null,
-        pendingDungeonCompletionForceSharedScope: '',
         pendingDungeonCompletionTimer: null,
         pendingDungeonCompletionFlushActive: false,
-        pendingDungeonCompletionWaitForCutsceneEnd: false,
         activeDungeonCutsceneScope: '',
         activeDungeonCutsceneRoomId: 0,
         activeDungeonCutsceneJoinedAtDialogIndex: 0,
@@ -122,10 +117,6 @@ function createFakeClient(name: string, token: number): FakeClient {
         lastDungeonCutsceneStartAt: 0,
         lastDungeonCutsceneEndScope: '',
         lastDungeonCutsceneEndAt: 0,
-        forcedDungeonCompletionScope: '',
-        finalizingDungeonCompletionScope: '',
-        completedDungeonCompletionScope: '',
-        completedDungeonCompletionSentAt: 0,
         armPendingTransferGrace() {
             return undefined;
         },
@@ -207,11 +198,24 @@ function resetFor(client: FakeClient): void {
     TutorialDungeonMechanics.resetState(scope);
     GlobalState.levelEntities.delete(scope);
     GlobalState.levelQuestProgress.delete(scope);
+    DungeonCompletionSystem.reset(scope);
     GlobalState.dungeonCutscenes.clear();
     GlobalState.sessionsByToken.clear();
     if (client.pendingDungeonCompletionTimer) {
         clearTimeout(client.pendingDungeonCompletionTimer);
         client.pendingDungeonCompletionTimer = null;
+    }
+}
+
+function testOnlyTagUgoIsServerSpawned(): void {
+    for (const levelName of ['TutorialDungeon', 'TutorialDungeonHard']) {
+        const serverNpcs = NpcLoader.getNpcsForLevel(levelName);
+        assert.equal(serverNpcs.length, 1, `${levelName} should retain exactly one server-spawned entity`);
+        assert.equal(serverNpcs[0].id, TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
+        assert.equal(serverNpcs[0].name, 'GoblinBoss1');
+        assert.equal(serverNpcs[0].team, EntityTeam.ENEMY);
+        assert.equal(serverNpcs[0].boss, true);
+        assert.equal(serverNpcs[0].serverOnlyObjective, false);
     }
 }
 
@@ -239,12 +243,21 @@ async function testAnnaChainCompletesAfterBoss(): Promise<void> {
     MissionHandler.noteDungeonCutsceneStart(client as never, 11);
     await MissionHandler.handleForcedDungeonObjectiveCompletion(client as never, annaChainEntity());
 
-    assert.equal(client.pendingDungeonCompletionScope, scope);
-    assert.equal(client.pendingDungeonCompletionWaitForCutsceneEnd, true);
+    assert.equal(client.pendingDungeonCompletionScope, '', 'completion must wait in the shared state, not a client timer');
+    DungeonCompletionSystem.noteClientCompletionSignal(
+        scope,
+        DungeonCompletionSystem.getParticipantKey(client as never),
+        100
+    );
+    const beforeCutsceneEnd = DungeonCompletionSystem.evaluate(scope);
+    assert.equal(beforeCutsceneEnd.ready, false, 'client completion signal must not bypass the active end cutscene');
+    assert.equal(beforeCutsceneEnd.reason, 'cutscene_gate_pending');
+    assert.equal(packetCount(client, 0x87), 0, 'rank result must remain hidden until the end cutscene finishes');
+
     MissionHandler.noteDungeonCutsceneEnd(client as never, 11);
     await sleep(5);
 
-    assert.equal(TutorialDungeonMechanics.hasCompletionObjectives(scope), true);
+    assert.equal(DungeonCompletionSystem.evaluate(scope).objectivesMet, true);
     assert.equal(packetCount(client, 0x87), 1, 'final rescue should emit one rank result');
 
     await MissionHandler.handleForcedDungeonObjectiveCompletion(client as never, annaChainEntity());
@@ -297,6 +310,7 @@ function testBossIntroAndThresholdsAreServerTracked(): void {
 
 async function main(): Promise<void> {
     ensureDataLoaded();
+    testOnlyTagUgoIsServerSpawned();
     await testBossDefeatWaitsForAnnaChain();
     await testAnnaChainCompletesAfterBoss();
     testScriptedObjectiveStateIsIdempotent();
