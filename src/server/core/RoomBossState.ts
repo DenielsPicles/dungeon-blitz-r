@@ -113,3 +113,17 @@ export function isRoomBossEntity(levelScope: string, entity: any): boolean {
 
     return false;
 }
+
+export function getRoomBossAwareRoomId(entity: any): number {
+    if (!entity || typeof entity !== 'object') {
+        return 0;
+    }
+
+    const roomBossRoomId = Number(entity?.roomBossRoomId ?? NaN);
+    if (Number.isFinite(roomBossRoomId) && roomBossRoomId >= 0) {
+        return Math.round(roomBossRoomId);
+    }
+
+    const roomId = Number(entity?.roomId ?? 0);
+    return Number.isFinite(roomId) ? Math.max(0, Math.round(roomId)) : 0;
+}

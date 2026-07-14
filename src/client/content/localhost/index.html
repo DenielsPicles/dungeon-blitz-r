@@ -135,7 +135,7 @@
     document.cookie = "db_lang=; path=/; max-age=0; SameSite=Lax";
 
     const languageParam = urlLanguage ? `&lang=${urlLanguage}` : "";
-    const swfUrl = `/p/cbp/DungeonBlitz.swf?fv=cbp&gv=cbp${languageParam}`;
+    const swfUrl = `/p/cbp/DungeonBlitz.1.8.0.swf?fv=cbp&gv=cbp&clientrev=discord-oauth-bootstrap-2${languageParam}`;
     console.log("[DungeonBlitzHost] Loading SWF", swfUrl);
     const localBridgeBaseUrl = "http://127.0.0.1:47631";
     const selfPresenceUrl = "/api/presence/self";
@@ -240,6 +240,20 @@
       status.style.display = "block";
     }
 
+    function resumeDiscordOAuthInSwf(pendingEmail) {
+      const swf = document.getElementById("DungeonBlitz");
+      if (!swf || typeof swf.SWFDiscordOAuthLogin !== "function") {
+        return false;
+      }
+
+      try {
+        const result = swf.SWFDiscordOAuthLogin(pendingEmail);
+        return result === true || result === "true";
+      } catch (_error) {
+        return false;
+      }
+    }
+
     async function pollDiscordPendingLogin() {
       if (!discordPendingPollUntil || Date.now() > discordPendingPollUntil) {
         stopDiscordPendingLoginPoll();
@@ -261,6 +275,16 @@
         }
 
         stopDiscordPendingLoginPoll();
+        const pendingEmail = String(payload.email || "").trim();
+        showDiscordStatus(
+          pendingEmail
+            ? `Discord login tamamlandi (${pendingEmail}). Oyun hesaba baglaniyor...`
+            : "Discord login tamamlandi. Oyun hesaba baglaniyor..."
+        );
+        if (resumeDiscordOAuthInSwf(pendingEmail)) {
+          return;
+        }
+
         showDiscordStatus("Discord login tamamlandi. Oyun yenileniyor...");
         embedDungeonBlitzSwf(true);
       } catch (_error) {
@@ -357,6 +381,9 @@
       const objectSwfUrl = forceReload
         ? `${swfUrl}&oauth=${Date.now()}-${++discordReloadNonce}`
         : swfUrl;
+      const oauthBootstrapValue = forceReload
+        ? new URL(objectSwfUrl, window.location.origin).searchParams.get("oauth") || ""
+        : "";
       object.id = "DungeonBlitz";
       object.name = "DungeonBlitz";
       object.type = "application/x-shockwave-flash";
@@ -366,6 +393,9 @@
 
       const params = {
         movie: objectSwfUrl,
+        FlashVars: oauthBootstrapValue
+          ? `oauth=${encodeURIComponent(oauthBootstrapValue)}`
+          : "",
         allowScriptAccess: "always",
         allowFullScreen: "true",
         wmode: "direct"

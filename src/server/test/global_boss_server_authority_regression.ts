@@ -243,6 +243,47 @@ async function testWolfsEndBossProxyAndRegularHostile(levelName: 'TutorialDungeo
     assert.equal(Math.max(0, Number(boss.deathVersion ?? 0)), 1, `${levelName} canonical boss death must commit once`);
 }
 
+async function testTutorialBoatKrakenTentacleProxyCombat(): Promise<void> {
+    const liveBossRoomId = 2333678904;
+    const client = createFakeClient('TutorialBoat', 'tutorial-boat-kraken-tentacle-proxy', 56006);
+    client.currentRoomId = liveBossRoomId;
+    attachPlayer(client);
+    GlobalState.sessionsByToken.set(client.token, client as never);
+    EntityHandler.sendInitialLevelEntities(client as never, 'TutorialBoat');
+
+    const scope = getLevelScopeKey('TutorialBoat', client.levelInstanceId);
+    const levelMap = GlobalState.levelEntities.get(scope);
+    assert.ok(levelMap, 'TutorialBoat must have a level entity map');
+    const boss = Array.from(levelMap.values()).find((entity) =>
+        EntityHandler.isServerAuthorityHostileEntity('TutorialBoat', entity) &&
+        String(entity?.name ?? '') === 'IntroKraken'
+    );
+    assert.ok(boss, 'TutorialBoat must seed the canonical IntroKraken');
+    boss.roomBoss = true;
+    boss.isRoomBoss = true;
+    boss.roomBossRoomId = liveBossRoomId;
+
+    const tentacleLocalId = 770001;
+    EntityHandler.handleEntityFullUpdate(
+        client as never,
+        buildHostileFullUpdate(tentacleLocalId, 'KrakenMain', Number(boss.x) + 80, Number(boss.y), liveBossRoomId)
+    );
+    assert.equal(EntityHandler.resolveEntityAlias(client as never, tentacleLocalId), boss.id, 'KrakenMain tentacle proxy must alias to canonical IntroKraken');
+    assert.equal(levelMap.has(tentacleLocalId), false, 'KrakenMain tentacle proxy must not create a separate local hostile');
+
+    const goblinLocalId = 770101;
+    EntityHandler.handleEntityFullUpdate(
+        client as never,
+        buildHostileFullUpdate(goblinLocalId, 'IntroGoblinJumper', Number(boss.x) - 300, Number(boss.y), liveBossRoomId)
+    );
+    assert.equal(EntityHandler.resolveEntityAlias(client as never, goblinLocalId), goblinLocalId, 'Lost At Sea goblin wave enemies must stay client-owned');
+    assert.equal(Boolean(client.entities.get(goblinLocalId)?.clientSpawned), true, 'Lost At Sea goblin wave enemy must remain a client spawn');
+
+    const bossHpBefore = Math.max(1, Math.round(Number(boss.hp ?? boss.maxHp ?? 1)));
+    await CombatHandler.handlePowerHit(client as never, buildPowerHitPayload(tentacleLocalId, client.clientEntID, 100));
+    assert.equal(Number(boss.hp), bossHpBefore - 100, 'player damage against KrakenMain tentacle must reduce canonical Kraken HP');
+}
+
 function testMultiBossProxyIdentity(): void {
     const levelName = 'SD_Mission4';
     const client = createFakeClient(levelName, 'global-boss-multi-identity', 53003);
@@ -290,6 +331,10 @@ async function main(): Promise<void> {
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();
         await testWolfsEndBossProxyAndRegularHostile('TutorialDungeonHard');
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        await testTutorialBoatKrakenTentacleProxyCombat();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();

@@ -5,12 +5,22 @@ import { Config } from '../core/config';
 import { GameData } from '../core/GameData';
 import { normalizeAccountIdentifier, PasswordRecord } from '../auth/PasswordAuth';
 import { WalletService } from './WalletService';
+import { GameDataPersistenceAdapter, MongoGameDataAdapter } from './MongoGameDataAdapter';
 
 export class JsonAdapter implements IDatabase {
     private static readonly renameRetryDelaysMs = [25, 50, 100, 200, 350];
     private static readonly saveQueues = new Map<string, Promise<void>>();
     private static renameFile = (fromPath: string, toPath: string): Promise<void> =>
         fs.rename(fromPath, toPath);
+    private static mongoGameData: GameDataPersistenceAdapter | null = Config.ENABLE_MONGO_GAME_DATA
+        ? new MongoGameDataAdapter(
+            Config.MONGODB_URI,
+            Config.MONGODB_DB_NAME,
+            Config.MONGODB_ACCOUNTS_COLLECTION,
+            Config.MONGODB_SAVES_COLLECTION,
+            Config.MONGODB_COUNTERS_COLLECTION
+        )
+        : null;
     private accountsPath: string;
     private savesDir: string;
     private legacyAccountsPath: string;
@@ -21,6 +31,18 @@ export class JsonAdapter implements IDatabase {
         this.savesDir = path.resolve(Config.DATA_DIR, 'data', 'saves');
         this.legacyAccountsPath = path.resolve(Config.DATA_DIR, 'Accounts.json');
         this.legacySavesDir = path.resolve(Config.DATA_DIR, 'saves');
+    }
+
+    public static async initializeMongoGameData(): Promise<void> {
+        await JsonAdapter.mongoGameData?.connect();
+    }
+
+    public static async closeMongoGameData(): Promise<void> {
+        await JsonAdapter.mongoGameData?.close();
+    }
+
+    public static configureMongoGameDataForTests(adapter: GameDataPersistenceAdapter | null): void {
+        JsonAdapter.mongoGameData = adapter;
     }
 
     private normalizeCharacterName(value: string | null | undefined): string {
@@ -114,7 +136,9 @@ export class JsonAdapter implements IDatabase {
                 Array.isArray(characters) ? characters : []
             )
         );
-        const existing = await this.readSaveFile(userId);
+        const existing = JsonAdapter.mongoGameData
+            ? { user_id: userId, characters: await JsonAdapter.mongoGameData.loadCharacters(userId) }
+            : await this.readSaveFile(userId);
 
         if (
             normalizedCharacters.length === 0 &&
@@ -125,6 +149,11 @@ export class JsonAdapter implements IDatabase {
             console.warn(
                 `[JsonAdapter] Refusing to overwrite non-empty save ${savePath} with an empty character list`
             );
+            return;
+        }
+
+        if (JsonAdapter.mongoGameData) {
+            await JsonAdapter.mongoGameData.saveCharacters(userId, normalizedCharacters);
             return;
         }
 
@@ -311,6 +340,9 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async getAccount(email: string): Promise<UserAccount | null> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.getAccount(email);
+        }
         const normalizedEmail = normalizeAccountIdentifier(email);
         if (!normalizedEmail) {
             return null;
@@ -321,6 +353,9 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async getAccountById(userId: number): Promise<UserAccount | null> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.getAccountById(userId);
+        }
         const normalizedUserId = Math.max(0, Math.round(Number(userId ?? 0)));
         if (!normalizedUserId) {
             return null;
@@ -331,11 +366,17 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async getAccountId(email: string): Promise<number | null> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.getAccountId(email);
+        }
         const account = await this.getAccount(email);
         return account ? account.user_id : null;
     }
 
     public async findAccountByDiscordId(discordId: string): Promise<UserAccount | null> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.findAccountByDiscordId(discordId);
+        }
         const normalizedDiscordId = this.normalizeDiscordId(discordId);
         if (!normalizedDiscordId) {
             return null;
@@ -350,6 +391,9 @@ export class JsonAdapter implements IDatabase {
         discordUser: DiscordAccountProfile,
         sponsor?: SponsorAccountMetadata
     ): Promise<UserAccount> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.linkDiscordToAccount(userId, discordUser, sponsor);
+        }
         await fs.mkdir(path.dirname(this.accountsPath), { recursive: true });
 
         const normalizedUserId = Math.max(0, Math.round(Number(userId ?? 0)));
@@ -388,6 +432,9 @@ export class JsonAdapter implements IDatabase {
         discordUser: DiscordAccountProfile,
         sponsor?: SponsorAccountMetadata
     ): Promise<UserAccount> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.createDiscordAccount(email, discordUser, sponsor);
+        }
         await this.ensureSavesDir();
         await fs.mkdir(path.dirname(this.accountsPath), { recursive: true });
 
@@ -434,6 +481,9 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async createAccount(email: string, passwordRecord: PasswordRecord): Promise<UserAccount> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.createAccount(email, passwordRecord);
+        }
         await this.ensureSavesDir();
         await fs.mkdir(path.dirname(this.accountsPath), { recursive: true });
 
@@ -467,6 +517,9 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async updateAccountPassword(email: string, passwordRecord: PasswordRecord): Promise<UserAccount | null> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.updateAccountPassword(email, passwordRecord);
+        }
         await fs.mkdir(path.dirname(this.accountsPath), { recursive: true });
 
         const normalizedEmail = normalizeAccountIdentifier(email);
@@ -496,15 +549,20 @@ export class JsonAdapter implements IDatabase {
 
     public async loadCharacters(userId: number): Promise<Character[]> {
         await JsonAdapter.waitForQueuedSave(path.join(this.savesDir, `${userId}.json`));
-        const save = await this.readSaveFile(userId);
-        if (!save || !Array.isArray(save.characters)) {
+        const characters = JsonAdapter.mongoGameData
+            ? await JsonAdapter.mongoGameData.loadCharacters(userId)
+            : (await this.readSaveFile(userId))?.characters;
+        if (!Array.isArray(characters)) {
             return [];
         }
-        const characters = save.characters.map((entry) => this.normalizeCharacterProgress(entry) as Character);
-        return WalletService.overlayWallets(userId, characters);
+        const normalizedCharacters = characters.map((entry) => this.normalizeCharacterProgress(entry) as Character);
+        return WalletService.overlayWallets(userId, normalizedCharacters);
     }
 
     public async loadAllCharacterRecords(): Promise<UserSaveData[]> {
+        if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.loadAllCharacterRecords();
+        }
         const records: UserSaveData[] = [];
 
         try {
@@ -573,6 +631,9 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async isCharacterNameTaken(name: string): Promise<boolean> {
+         if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.isCharacterNameTaken(name);
+         }
          // This is expensive in JSON, but matches Python implementation
          // In real DB, this would be a query.
          // Here we iterate all files.
@@ -600,6 +661,9 @@ export class JsonAdapter implements IDatabase {
     }
 
     public async getAccountIdByCharName(charName: string): Promise<number | null> {
+         if (JsonAdapter.mongoGameData) {
+            return JsonAdapter.mongoGameData.getAccountIdByCharName(charName);
+         }
          const cleanName = charName.trim().toLowerCase();
          try {
              const files = await fs.readdir(this.savesDir);

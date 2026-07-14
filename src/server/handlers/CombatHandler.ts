@@ -25,7 +25,7 @@ import { GameData } from '../core/GameData';
 import { CharacterSync } from '../utils/CharacterSync';
 import { sendConsumableUpdate } from '../utils/ConsumableState';
 import { LevelConfig } from '../core/LevelConfig';
-import { isRoomBossEntity } from '../core/RoomBossState';
+import { getRoomBossAwareRoomId, isRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import { RewardHandler } from './RewardHandler';
 import {
@@ -242,6 +242,11 @@ export class CombatHandler {
         ['JC_Mission1Hard', new Set(['imperialchampionhard', 'imperialcommandergrahl', 'imperialcommandergrahlhard'])],
         ['JC_Mission3', new Set(['defectormage', 'princefriedrichhocke', 'princefredrichhocke'])],
         ['JC_Mission3Hard', new Set(['defectormagehard', 'princefriedrichhocke', 'princefredrichhocke'])]
+    ]);
+    private static readonly LOST_AT_SEA_KRAKEN_ENTITY_KEYS = new Set<string>([
+        'introkraken',
+        'krakenmain',
+        'krakenheavy'
     ]);
     private static readonly POWER_HIT_CLIENT_AUTHORITY_BOSS_LEVELS = new Set([
         'AC_Mission5',
@@ -1258,6 +1263,12 @@ export class CombatHandler {
         return [...new Set(keys)];
     }
 
+    private static isLostAtSeaKrakenHostile(levelScope: string, entity: any): boolean {
+        const levelName = LevelConfig.normalizeLevelName(getScopeLevelName(levelScope)) || getScopeLevelName(levelScope);
+        return levelName === 'TutorialBoat' &&
+            CombatHandler.getHostileIdentityKeys(entity).some((key) => CombatHandler.LOST_AT_SEA_KRAKEN_ENTITY_KEYS.has(key));
+    }
+
     private static isEquivalentHostileEntity(levelScope: string, sourceEntity: any, candidate: any): boolean {
         if (
             !levelScope ||
@@ -1274,6 +1285,13 @@ export class CombatHandler {
         const sourceId = Math.max(0, Math.round(Number(sourceEntity.id ?? 0)));
         const candidateId = Math.max(0, Math.round(Number(candidate.id ?? 0)));
         if (sourceId > 0 && sourceId === candidateId) {
+            return true;
+        }
+
+        if (
+            CombatHandler.isLostAtSeaKrakenHostile(levelScope, sourceEntity) &&
+            CombatHandler.isLostAtSeaKrakenHostile(levelScope, candidate)
+        ) {
             return true;
         }
 
@@ -1359,7 +1377,19 @@ export class CombatHandler {
             return localId;
         }
 
-        if (CombatHandler.resolveLevelEntity(levelScope, localId)) {
+        const localLevelEntity = CombatHandler.resolveLevelEntity(levelScope, localId);
+        if (localLevelEntity) {
+            if (
+                !CombatHandler.isServerAuthoritySyncNpc(levelScope, localLevelEntity) &&
+                CombatHandler.isLostAtSeaKrakenHostile(levelScope, localLevelEntity)
+            ) {
+                const canonicalEntity = CombatHandler.findEquivalentLevelHostile(levelScope, localLevelEntity);
+                const canonicalId = Math.max(0, Math.round(Number(canonicalEntity?.id ?? 0)));
+                if (canonicalId > 0 && canonicalId !== localId) {
+                    EntityHandler.rememberEntityAlias(client, localId, canonicalId);
+                    return canonicalId;
+                }
+            }
             return localId;
         }
 
@@ -1456,8 +1486,12 @@ export class CombatHandler {
                 continue;
             }
 
-            const entityRoomId = Math.round(Number(entity?.roomId ?? -1));
-            if (clientRoomId >= 0 && entityRoomId >= 0 && !sharesRoomIds(clientRoomId, entityRoomId)) {
+            const entityRoomId = getRoomBossAwareRoomId(entity);
+            if (
+                clientRoomId >= 0 &&
+                entityRoomId >= 0 &&
+                !sharesRoomIds(clientRoomId, entityRoomId)
+            ) {
                 continue;
             }
 

@@ -184,11 +184,6 @@ export class StaticServer {
         return emails.size === 1 ? [...emails][0] ?? '' : '';
     }
 
-    private async resolveRequesterAccount(req: Request): Promise<UserAccount | null> {
-        const email = this.resolveRequesterAccountEmail(req);
-        return email ? await this.db.getAccount(email) : null;
-    }
-
     private async authenticateRequesterLoginClient(req: Request, account: UserAccount): Promise<boolean> {
         const remoteAddress = this.normalizeRemoteAddress(this.resolveRequesterAddress(req));
         if (!remoteAddress || !account.user_id) {
@@ -521,19 +516,19 @@ try {
             );
         });
 
-        this.app.get('/api/auth/discord/config', async (req, res) => {
-            const requesterAccount = await this.resolveRequesterAccount(req);
+        this.app.get('/api/auth/discord/config', (_req, res) => {
             const authUrl = '/auth/discord';
-            const linkUrl = requesterAccount ? '/auth/discord?mode=link' : null;
             res.setHeader('Cache-Control', 'no-store');
             res.json({
                 configured: this.discordAccountLinks.isConfigured(),
                 required: true,
                 authUrl,
-                linkUrl,
+                linkUrl: null,
                 clientAuthUrl: `${authUrl}?client=discord`,
-                clientLinkUrl: linkUrl ? `${linkUrl}&client=discord` : null,
-                mode: requesterAccount ? 'link' : 'login',
+                clientLinkUrl: null,
+                mode: 'login',
+                createsAccounts: false,
+                accountCreateCommand: '/create-account',
                 redirectUri: this.discordAccountLinks.getRedirectUri(),
                 linkedRolesConnectUrl: this.discordAccountLinks.getLinkedRolesConnectUrl(),
                 sponsorRequired: Config.SPONSOR_ACCOUNT_CREATION_REQUIRED
@@ -564,12 +559,7 @@ try {
                 return;
             }
 
-            const requesterAccount = await this.resolveRequesterAccount(req);
-            const requestedMode = String(req.query.mode ?? '').trim().toLowerCase();
-            const useLinkMode = Boolean(requesterAccount && (requestedMode === 'link' || requesterAccount));
-            const result = useLinkMode && requesterAccount
-                ? await this.discordAccountLinks.createLinkAuthorizeUrlForAccount(requesterAccount)
-                : await this.discordAccountLinks.createLoginAuthorizeUrl();
+            const result = await this.discordAccountLinks.createLoginAuthorizeUrl();
 
             if (!result.ok || !result.authorizeUrl) {
                 console.warn(`[DiscordOAuth] Start failed: ${result.reason}`);
@@ -579,7 +569,7 @@ try {
                 return;
             }
 
-            console.log(`[DiscordOAuth] Starting ${useLinkMode ? 'link' : 'login'} flow`);
+            console.log('[DiscordOAuth] Starting login flow');
             res.redirect(
                 this.isDiscordClientLaunchRequest(req)
                     ? this.toDiscordClientAuthorizeUrl(result.authorizeUrl)
@@ -613,9 +603,11 @@ try {
                 const status = [
                     'duplicate-discord-linked-account',
                     'account-sync-failed'
-                ].includes(result.reason) ? 409 : 400;
+                ].includes(result.reason) ? 409 : result.reason === 'account-not-found' ? 404 : 400;
                 const title = result.reason === 'duplicate-discord-linked-account'
                     ? 'Discord Account Already Linked'
+                    : result.reason === 'account-not-found'
+                        ? 'Create Your Account in Discord First'
                     : result.reason === 'missing-discord-email'
                             ? 'Discord Email Required'
                             : result.reason === 'discord-email-unverified'
@@ -666,7 +658,11 @@ try {
             );
         });
 
-        this.app.get(`/p/${this.selectedAssetVersion}/DungeonBlitz.swf`, (req, res) => {
+        this.app.get([
+            `/p/${this.selectedAssetVersion}/DungeonBlitz.swf`,
+            `/p/${this.selectedAssetVersion}/DungeonBlitz.discord-oauth.swf`,
+            `/p/${this.selectedAssetVersion}/DungeonBlitz.1.8.0.swf`
+        ], (req, res) => {
             if (!this.isCanonicalSelectedSwfRequest(req)) {
                 res.redirect(302, this.getCanonicalSelectedSwfUrl(req));
                 return;

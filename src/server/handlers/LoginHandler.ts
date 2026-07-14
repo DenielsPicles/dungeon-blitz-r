@@ -7,18 +7,14 @@ import { JsonAdapter } from '../database/JsonAdapter';
 import { UserAccount } from '../database/Database';
 import { GlobalState } from '../core/GlobalState';
 import {
-    DISCORD_SYNC_REQUIRED_MESSAGE,
-    hasValidDiscordSync,
-    hashClientPasswordInput,
     isValidPasswordInput,
-    isValidRegistrationPassword,
     normalizeAccountIdentifier,
     unmaskChallengeXorClientPassword,
     verifyClientPasswordInput
 } from '../auth/PasswordAuth';
 
 const INVALID_CREDENTIALS_MESSAGE = "Invalid email or password";
-const DISCORD_BOOTSTRAP_REQUIRED_MESSAGE = "Use Discord login first to create or sync this account.";
+const DISCORD_ACCOUNT_CREATE_MESSAGE = "Create your account in Discord with /create-account.";
 const PASSWORD_NOT_SET_MESSAGE = "Set a password before using password login.";
 
 interface LoginPayload {
@@ -168,81 +164,13 @@ export class LoginHandler {
         await client.resetForLoginCycle('login create');
 
         const payload = LoginHandler.parseLoginPayload(data);
-        if (!payload) {
-            LoginHandler.rejectLogin(client, '', 'invalid registration payload');
-            return;
-        }
-
-        const { email, password } = payload;
-        const pending = GlobalState.consumeDiscordOAuthLogin(client.socket.remoteAddress, email);
-        if (pending) {
-            await LoginHandler.completeAuthentication(
-                client,
-                pending.account,
-                'discord oauth pending create',
-                true
-            );
-            return;
-        }
-
-        if (!isValidRegistrationPassword(password)) {
-            LoginHandler.clearFailedAuthState(client);
-            console.warn(`[Login] Registration rejected for ${email}: password failed validation`);
-            LoginHandler.sendPopup(client, "Password must be at least 6 characters", false);
-            return;
-        }
-
-        console.log(`[Login] Set Password: ${email}`);
-
-        const existingAccount = await LoginHandler.db.getAccount(email);
-        if (!existingAccount) {
-            LoginHandler.rejectLogin(
-                client,
-                email,
-                'password registration attempted before Discord OAuth account bootstrap',
-                DISCORD_BOOTSTRAP_REQUIRED_MESSAGE
-            );
-            return;
-        }
-
-        if (!hasValidDiscordSync(existingAccount)) {
-            LoginHandler.rejectLogin(
-                client,
-                email,
-                'password registration attempted before valid Discord sync/link',
-                DISCORD_SYNC_REQUIRED_MESSAGE
-            );
-            return;
-        }
-
-        if (existingAccount.passwordHash) {
-            LoginHandler.clearFailedAuthState(client);
-            console.warn(`[Login] Password setup rejected for ${email}: account already has a password`);
-            LoginHandler.sendPopup(client, "Account already exists", false);
-            return;
-        }
-
-        let account;
-        try {
-            // The create packet masks the digest with the challenge exactly like
-            // the authenticate packet; store the unmasked digest so later logins
-            // (which arrive under different challenges) can verify it.
-            account = await LoginHandler.db.updateAccountPassword(
-                email,
-                await hashClientPasswordInput(unmaskChallengeXorClientPassword(password, client.challengeStr))
-            );
-            if (!account) {
-                throw new Error('Account not found.');
-            }
-        } catch (err) {
-            LoginHandler.clearFailedAuthState(client);
-            const message = (err as Error).message;
-            console.warn(`[Login] Password setup failed for ${email}: ${message}`);
-            LoginHandler.sendPopup(client, "Password setup failed", false);
-            return;
-        }
-
-        await LoginHandler.completeAuthentication(client, account, 'password setup');
+        const email = payload?.email ?? '';
+        LoginHandler.rejectLogin(
+            client,
+            email,
+            'in-game account creation is disabled; Discord /create-account is required',
+            DISCORD_ACCOUNT_CREATE_MESSAGE
+        );
     }
 
     static async handleLoginAuthenticate(client: Client, data: Buffer): Promise<void> {

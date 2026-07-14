@@ -73,6 +73,11 @@ export class EntityHandler {
     private static readonly STRICT_SERVER_SPAWN_HOSTILE_LEVELS = new Set<string>([
         'AC_Mission1'
     ]);
+    private static readonly LOST_AT_SEA_KRAKEN_PROXY_NAMES = new Set<string>([
+        'introkraken',
+        'krakenmain',
+        'krakenheavy'
+    ]);
     private static readonly CANONICAL_VISIBLE_PROXY_MATCH_MAX_DISTANCE_SQ = 400 * 400;
     static readonly SERVER_AUTHORITY_ENTITY_LEVEL = 50;
     private static readonly HOSTILE_BASE_HITPOINTS = [
@@ -872,6 +877,17 @@ export class EntityHandler {
         return normalized.endsWith('hard') ? normalized.slice(0, -4) : normalized;
     }
 
+    private static isLostAtSeaKrakenProxy(levelName: string | null | undefined, entity: any): boolean {
+        if ((LevelConfig.normalizeLevelName(getScopeLevelName(String(levelName ?? ''))) || '') !== 'TutorialBoat') {
+            return false;
+        }
+
+        const proxyName = EntityHandler.normalizeServerAuthorityProxyName(
+            entity?.name ?? entity?.EntName ?? entity?.entName ?? entity?.characterName ?? entity?.character_name
+        );
+        return EntityHandler.LOST_AT_SEA_KRAKEN_PROXY_NAMES.has(proxyName);
+    }
+
     private static findServerAuthorityProxyCanonical(
         levelName: string | null | undefined,
         levelMap: Map<number, any> | null,
@@ -961,6 +977,16 @@ export class EntityHandler {
             }
             if (spawnKeyMatchCount === 1) {
                 return spawnKeyMatch;
+            }
+        }
+
+        if (EntityHandler.isLostAtSeaKrakenProxy(levelName, entity)) {
+            const krakenBosses = Array.from(levelMap.values()).filter((candidate) =>
+                EntityHandler.isServerAuthorityHostileEntity(levelName, candidate) &&
+                EntityHandler.isLostAtSeaKrakenProxy(levelName, candidate)
+            );
+            if (krakenBosses.length === 1) {
+                return krakenBosses[0];
             }
         }
 

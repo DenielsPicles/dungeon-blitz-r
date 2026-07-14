@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -14,6 +14,7 @@
     "start:discord-bridge": "node tools/startDiscordBridge.js",
     "start:discord-bridge:multiplayer": "node tools/startDiscordBridge.js",
     "reset-password": "ts-node scripts/set_account_password.ts",
+    "migrate:game-data-to-mongo": "node --env-file-if-exists=.env -r ts-node/register scripts/migrate_game_data_to_mongo.ts",
     "validate:east-wing-spawns": "node tools/exportTheEastWingEnemies.js",
     "validate:dungeon-spawns": "node tools/exportTheEastWingEnemies.js"
   },

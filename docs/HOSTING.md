@@ -89,9 +89,22 @@ MONGODB_DB_NAME=dungeon_blitz_r
 MONGODB_WALLET_COLLECTION=wallets
 MONGO_WALLET_FLUSH_INTERVAL_MS=5000
 ENABLE_MONGO_WALLET=true
+ENABLE_MONGO_GAME_DATA=true
+MONGODB_ACCOUNTS_COLLECTION=accounts
+MONGODB_SAVES_COLLECTION=saves
+MONGODB_COUNTERS_COLLECTION=counters
 ```
 
 `MONGODB_DB_NAME` defaults to `dungeon_blitz_r`, `MONGODB_WALLET_COLLECTION` defaults to `wallets`, and `MONGO_WALLET_FLUSH_INTERVAL_MS` defaults to `5000`. `ENABLE_MONGO_WALLET` defaults to true when `MONGODB_URI` is present and false otherwise. If Mongo wallet mode is enabled but the server cannot connect at startup, the game server refuses to start instead of falling back to stale JSON wallet values.
+
+`ENABLE_MONGO_GAME_DATA` makes the `accounts` and `saves` collections authoritative for login and the complete character save object. It is deliberately disabled by default so an existing wallet-only deployment cannot start against empty account collections. Before enabling it, copy the current `Accounts.json` and every `data/saves/*.json` document:
+
+```bash
+npm run migrate:game-data-to-mongo -- --dry-run
+npm run migrate:game-data-to-mongo
+```
+
+The migration preserves every complete character object in each account save, creates an empty save when an account has no save file, and initializes the shared user-id counter. Save files whose `user_id` is absent from `Accounts.json` are skipped by default so test fixtures and abandoned files cannot become live accounts; use `--include-orphan-saves` only after reviewing them. The migration is insert-only by default, so rerunning it cannot replace newer Mongo saves. Use `--overwrite` only for an intentional pre-cutover refresh. The Discord bot's `/create-account` command writes accounts and saves to these same collections.
 
 Wallet documents are intentionally small. Each wallet document has a deterministic `_id` of `<gameUserId>:<characterNameKey>`, the numeric `gameUserId`, character name fields, wallet currency fields, `lockboxes`, `version`, and `updatedAt`. The wallet collection must not store Discord `accessToken`, `refreshToken`, `scope`, passwords, session secrets, or raw packet data.
 

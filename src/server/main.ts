@@ -40,6 +40,7 @@ import { PetHandler } from './handlers/PetHandler';
 import { discordSocialBridge } from './integrations/DiscordSocialBridge';
 import { ProjectInfo } from './core/ProjectInfo';
 import { WalletService } from './database/WalletService';
+import { JsonAdapter } from './database/JsonAdapter';
 import * as path from 'path';
 
 import { StaticServer } from './core/StaticServer';
@@ -237,6 +238,7 @@ const staticServer = new StaticServer(Config.STATIC_PORT, '../client/content/loc
 const gameServer = new GameServer(Config.PORTS[0], router, Config.BIND_HOST);
 
 async function startServers(): Promise<void> {
+    await JsonAdapter.initializeMongoGameData();
     await WalletService.initialize();
 
     if (Config.ENABLE_POLICY_SERVER) {
@@ -254,7 +256,7 @@ async function startServers(): Promise<void> {
 }
 
 void startServers().catch((error) => {
-    console.error('[Wallet] Mongo wallet startup failed; refusing to start with unsafe wallet authority:', error);
+    console.error('[Mongo] Persistence startup failed; refusing to start with unsafe data authority:', error);
     process.exit(1);
 });
 
@@ -272,6 +274,7 @@ function shutdown(signal: string, exitCode: number, onComplete?: () => void): vo
         staticServer.stop(),
         gameServer.stop(),
         policyServer?.stop() ?? Promise.resolve(),
+        JsonAdapter.closeMongoGameData(),
         WalletService.close()
     ];
 

@@ -334,79 +334,28 @@ export class DiscordAccountLinkService {
         }
 
         const linkedAccount = await this.db.findAccountByDiscordId(discordUser.id);
-        if (linkedAccount) {
+        if (!linkedAccount) {
+            return toDiscordOAuthFailure(
+                'account-not-found',
+                'login',
+                discordUser,
+                'No Dungeon Blitz account is linked to this Discord user. Run /create-account in Discord first.'
+            );
+        }
+
+        try {
+            // Account creation and password setup belong to the Discord bot's
+            // /account flow. The game OAuth endpoint only refreshes metadata on
+            // an already-linked account and hands that account to the game client.
             const sponsor = await this.optionalSponsorMetadata(discordUser);
-            const syncedAccount = await this.db.linkDiscordToAccount(linkedAccount.user_id, discordUser, sponsor);
+            const account = await this.db.linkDiscordToAccount(linkedAccount.user_id, discordUser, sponsor);
             return {
                 ok: true,
                 reason: 'ok',
                 mode: 'login',
-                account: await this.deliverGeneratedPassword(syncedAccount, discordUser),
+                account,
                 discordUser,
                 message: 'Discord login successful.'
-            };
-        }
-
-        const existingEmailAccount = await this.db.getAccount(discordUser.email ?? '');
-        if (existingEmailAccount) {
-            const existingDiscordId = normalizeDiscordId(existingEmailAccount.discordId);
-            if (existingDiscordId && existingDiscordId !== discordUser.id) {
-                return toDiscordOAuthFailure(
-                    'duplicate-discord-linked-account',
-                    'login',
-                    discordUser,
-                    'That Discord email is already tied to a different linked game account.'
-                );
-            }
-
-            const sponsor = await this.requireSponsorEligibility('login', discordUser);
-            if (!sponsor.ok) {
-                return sponsor.result;
-            }
-
-            try {
-                const linkedExistingAccount = await this.db.linkDiscordToAccount(
-                    existingEmailAccount.user_id,
-                    discordUser,
-                    sponsor.metadata
-                );
-                return {
-                    ok: true,
-                    reason: 'ok',
-                    mode: 'login',
-                    account: await this.deliverGeneratedPassword(linkedExistingAccount, discordUser),
-                    discordUser,
-                    message: 'Discord linked and login successful.'
-                };
-            } catch (err) {
-                return this.accountWriteFailure('login', discordUser, err);
-            }
-        }
-
-        const accountEmail = normalizeEmail(discordUser.email);
-        if (!accountEmail) {
-            return toDiscordOAuthFailure(
-                'missing-discord-email',
-                'login',
-                discordUser,
-                'Discord did not provide a usable verified email address.'
-            );
-        }
-
-        const sponsor = await this.requireSponsorEligibility('login', discordUser);
-        if (!sponsor.ok) {
-            return sponsor.result;
-        }
-
-        try {
-            const account = await this.db.createDiscordAccount(accountEmail, discordUser, sponsor.metadata);
-            return {
-                ok: true,
-                reason: 'created',
-                mode: 'login',
-                account: await this.deliverGeneratedPassword(account, discordUser),
-                discordUser,
-                message: 'Discord account created and login successful.'
             };
         } catch (err) {
             return this.accountWriteFailure('login', discordUser, err);

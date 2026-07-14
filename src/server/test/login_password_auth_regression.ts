@@ -149,44 +149,48 @@ async function createDiscordBootstrapAccount(adapter: JsonAdapter): Promise<{ em
     return { email, alias };
 }
 
-async function testDirectRegistrationRequiresDiscord(accountsPath: string): Promise<void> {
+async function testDirectRegistrationIsDisabled(accountsPath: string): Promise<void> {
     const client = createFakeClient();
     await LoginHandler.handleLoginCreate(client as any, buildLoginPacket('  NewUser@Example.COM ', 'correct-password'));
 
-    assertLoginFailed(client, 'direct password registration before Discord OAuth');
-    assert.equal(getLastPopupMessage(client), 'Use Discord login first to create or sync this account.');
+    assertLoginFailed(client, 'direct in-game account registration');
+    assert.equal(getLastPopupMessage(client), 'Create your account in Discord with /create-account.');
     assert.deepEqual(await readAccounts(accountsPath), [], 'direct password registration must not create an account');
 }
 
-async function testDiscordLinkedPasswordSetupStoresHash(accountsPath: string, adapter: JsonAdapter): Promise<void> {
+async function testInGameCreateCannotSetDiscordAccountPassword(accountsPath: string, adapter: JsonAdapter): Promise<void> {
     const { email, alias } = await createDiscordBootstrapAccount(adapter);
     const client = createFakeClient();
     await LoginHandler.handleLoginCreate(client as any, buildLoginPacket(`  ${alias.toUpperCase()} `, 'correct-password'));
 
-    assert.equal(client.authenticated, true, 'Discord-linked password setup should authenticate');
-    assert.equal(client.account.email, email, 'password setup should keep the Discord-derived primary email');
-    assert.equal(client.sentPackets.some((packet) => packet.id === 0x15), true, 'password setup should send character list');
+    assertLoginFailed(client, 'in-game password setup for a Discord account');
+    assert.equal(getLastPopupMessage(client), 'Create your account in Discord with /create-account.');
 
     const accounts = await readAccounts(accountsPath);
-    assert.equal(accounts.length, 1, 'password setup should keep exactly one account');
-    assert.equal(accounts[0].password, undefined, 'password setup must not store plaintext password');
-    assert.equal(accounts[0].passwordKdf, 'scrypt', 'password setup should store the password KDF');
-    assert.equal(typeof accounts[0].passwordSalt, 'string', 'password setup should store a salt');
-    assert.equal(typeof accounts[0].passwordHash, 'string', 'password setup should store a hash');
-    assert.notEqual(accounts[0].passwordHash, 'correct-password', 'password hash must not equal plaintext');
+    assert.equal(accounts.length, 1, 'rejected in-game setup should keep exactly one account');
+    assert.equal(accounts[0].email, email, 'rejected in-game setup should preserve the Discord account');
+    assert.equal(accounts[0].password, undefined, 'rejected in-game setup must not store plaintext password');
+    assert.equal(accounts[0].passwordHash, undefined, 'rejected in-game setup must not store a password hash');
     assert.equal(accounts[0].discordId, '12345', 'Discord id should remain linked');
-    assert.equal(accounts[0].discordSyncRequired, true, 'Discord sync should remain mandatory');
 }
 
-async function testDuplicateRegistrationDoesNotOverwrite(accountsPath: string): Promise<void> {
+async function setPasswordAsDiscordBot(adapter: JsonAdapter): Promise<void> {
+    const updated = await adapter.updateAccountPassword(
+        'newuser@example.com',
+        await hashPlaintextPasswordForClient('correct-password')
+    );
+    assert.ok(updated, 'Discord bot password modal should be represented by a direct database password update');
+}
+
+async function testInGameCreateDoesNotOverwriteBotPassword(accountsPath: string): Promise<void> {
     const before = await readAccounts(accountsPath);
     const beforeHash = before[0].passwordHash;
     const client = createFakeClient();
 
     await LoginHandler.handleLoginCreate(client as any, buildLoginPacket('newuser@example.com', 'second-password'));
 
-    assertLoginFailed(client, 'duplicate password setup');
-    assert.equal(getLastPopupMessage(client), 'Account already exists');
+    assertLoginFailed(client, 'in-game overwrite of a bot-set password');
+    assert.equal(getLastPopupMessage(client), 'Create your account in Discord with /create-account.');
     const after = await readAccounts(accountsPath);
     assert.equal(after.length, 1, 'duplicate password setup must not create another account');
     assert.equal(after[0].passwordHash, beforeHash, 'duplicate password setup must not overwrite password hash');
@@ -390,7 +394,7 @@ async function testPendingDiscordOAuthLoginAuthenticateFallback(accountsPath: st
     assert.equal(GlobalState.pendingDiscordOAuthLogins.size, 0, 'pending OAuth fallback should consume the handoff');
 }
 
-async function testPendingDiscordOAuthLoginCreateFallback(accountsPath: string, savesDir: string): Promise<void> {
+async function testPendingDiscordOAuthLoginDoesNotAuthorizeCreatePacket(accountsPath: string, savesDir: string): Promise<void> {
     const accounts = await readAccounts(accountsPath);
     const account = {
         email: 'oauth-create@example.com',
@@ -413,12 +417,9 @@ async function testPendingDiscordOAuthLoginCreateFallback(accountsPath: string, 
     const client = createFakeClient('127.0.0.1');
     await LoginHandler.handleLoginCreate(client as any, buildLoginPacket('oauth-create@example.com', 'short'));
 
-    assert.equal(client.authenticated, true, 'pending OAuth create fallback should authenticate before registration validation');
-    assert.equal(client.userId, 5, 'pending OAuth create fallback should set user id');
-    assert.equal(client.account.email, 'oauth-create@example.com', 'pending OAuth create fallback should load the account');
-    assert.deepEqual(client.characters, [{ name: 'OAuthCreateHero', class: 'ranger', gender: 'male', level: 1 }]);
-    assert.equal(client.sentPackets.some((packet) => packet.id === 0x15), true, 'pending OAuth create fallback should send character list');
-    assert.equal(GlobalState.pendingDiscordOAuthLogins.size, 0, 'pending OAuth create fallback should consume the handoff');
+    assertLoginFailed(client, 'pending OAuth must not authorize an account-create packet');
+    assert.equal(getLastPopupMessage(client), 'Create your account in Discord with /create-account.');
+    assert.equal(GlobalState.pendingDiscordOAuthLogins.size, 1, 'rejected create packet should preserve the OAuth handoff for login/version fallback');
 }
 
 async function main(): Promise<void> {
@@ -427,10 +428,11 @@ async function main(): Promise<void> {
     LoginHandler.db = adapter;
 
     try {
-        await testDirectRegistrationRequiresDiscord(accountsPath);
-        await testDiscordLinkedPasswordSetupStoresHash(accountsPath, adapter);
+        await testDirectRegistrationIsDisabled(accountsPath);
+        await testInGameCreateCannotSetDiscordAccountPassword(accountsPath, adapter);
+        await setPasswordAsDiscordBot(adapter);
         const expectedEmail = deriveDiscordAccountEmail('newuser@example.com', '12345');
-        await testDuplicateRegistrationDoesNotOverwrite(accountsPath);
+        await testInGameCreateDoesNotOverwriteBotPassword(accountsPath);
         LoginHandler.db = createAdapterForPaths(dataDir, accountsPath, savesDir);
         await testCorrectPasswordLogsIn(expectedEmail);
         await testWrongPasswordFails();
@@ -441,7 +443,7 @@ async function main(): Promise<void> {
         await testAliasResetPreservesSave(accountsPath, savesDir, expectedEmail);
         await testPendingDiscordOAuthLoginDelaysCharacterListAfterVersion(accountsPath, savesDir);
         await testPendingDiscordOAuthLoginAuthenticateFallback(accountsPath, savesDir);
-        await testPendingDiscordOAuthLoginCreateFallback(accountsPath, savesDir);
+        await testPendingDiscordOAuthLoginDoesNotAuthorizeCreatePacket(accountsPath, savesDir);
         console.log('login_password_auth_regression: ok');
     } finally {
         LoginHandler.db = originalDb;

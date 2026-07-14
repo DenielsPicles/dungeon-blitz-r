@@ -7,7 +7,7 @@ import { StaticServer } from '../core/StaticServer';
 import { GlobalState } from '../core/GlobalState';
 import { JsonAdapter } from '../database/JsonAdapter';
 import { DiscordAccountLinkService } from '../integrations/DiscordAccountLinkService';
-import { deriveClientPasswordDigest, verifyPassword } from '../auth/PasswordAuth';
+import { hashPlaintextPasswordForClient } from '../auth/PasswordAuth';
 
 type DiscordApiUserFixture = {
     id?: string;
@@ -148,11 +148,19 @@ async function testDiscordRoutesDisabled(): Promise<void> {
             configured: boolean;
             authUrl: string;
             required: boolean;
+            linkUrl: string | null;
+            mode: string;
+            createsAccounts: boolean;
+            accountCreateCommand: string;
             redirectUri: string;
         };
         assert.equal(config.configured, false, 'Discord OAuth should be disabled without env vars');
         assert.equal(config.required, true, 'Discord bootstrap should be reported as required');
         assert.equal(config.authUrl, '/auth/discord');
+        assert.equal(config.linkUrl, null, 'game OAuth should not expose legacy account linking');
+        assert.equal(config.mode, 'login', 'game OAuth should always be a quick-login flow');
+        assert.equal(config.createsAccounts, false, 'game OAuth must report that it cannot create accounts');
+        assert.equal(config.accountCreateCommand, '/create-account');
         assert.match(config.redirectUri, /\/auth\/discord\/callback$/, 'Discord redirect should match the registered local callback path');
 
         const startResponse = await fetch(`${baseUrl}/auth/discord`, { redirect: 'manual' });
@@ -199,6 +207,51 @@ async function testDiscordClientLaunchRedirect(): Promise<void> {
         assert.match(location, /^discord:\/\/-\/oauth2\/authorize\?/, 'Discord client launch should use the Discord protocol');
         assert.match(location, /client_id=test-client/, 'Discord client launch should preserve OAuth parameters');
         assert.match(location, /state=test-state/, 'Discord client launch should preserve OAuth state');
+    } finally {
+        await staticServer.stop();
+    }
+}
+
+async function testServedHostBootstrapsPendingDiscordLogin(): Promise<void> {
+    const staticServer = new StaticServer(0);
+    staticServer.start();
+
+    try {
+        const port = await waitForListening(staticServer);
+        const response = await fetch(`http://127.0.0.1:${port}/`);
+        assert.equal(response.status, 200, 'game host page should render');
+        const html = await response.text();
+
+        assert.match(
+            html,
+            /SWFDiscordOAuthLogin/,
+            'pending OAuth bootstrap should invoke the SWF quick-login callback'
+        );
+        assert.match(
+            html,
+            /payload\.email/,
+            'pending OAuth bootstrap should pass the pending account email to the SWF'
+        );
+        assert.match(
+            html,
+            /embedDungeonBlitzSwf\(true\)/,
+            'pending OAuth bootstrap should retain the SWF reload fallback'
+        );
+        assert.match(
+            html,
+            /[?&]oauth=\$\{Date\.now\(\)\}-\$\{\+\+discordReloadNonce\}/,
+            'reload fallback should retain a cache-busting OAuth query value'
+        );
+        assert.match(
+            html,
+            /FlashVars:\s*oauthBootstrapValue/,
+            'reload fallback should pass the OAuth marker as FlashVars'
+        );
+        assert.match(
+            html,
+            /DungeonBlitz\.1\.8\.0\.swf\?fv=cbp&gv=cbp&clientrev=discord-oauth-bootstrap-2/,
+            'the fixed SWF should use a distinct cache-safe asset URL'
+        );
     } finally {
         await staticServer.stop();
     }
@@ -264,10 +317,21 @@ async function testDiscordCallbackStoresPendingLoginWhenClientIsNotOpen(): Promi
     }
 }
 
-async function testDiscordOAuthCreatesLinkedAccount(): Promise<void> {
+async function testDiscordOAuthLogsIntoBotCreatedLinkedAccount(): Promise<void> {
     const { adapter, dataDir, accountsPath, savesDir } = await createTempAdapter();
     try {
         const sentDms: SentDm[] = [];
+        const created = await adapter.createDiscordAccount('tester@example.com', {
+            id: '123456789',
+            username: 'tester-before-login',
+            globalName: 'Tester Before Login',
+            email: 'tester@example.com',
+            emailVerified: true
+        });
+        const botPasswordRecord = await hashPlaintextPasswordForClient('bot-modal-password');
+        const botReadyAccount = await adapter.updateAccountPassword(created.email, botPasswordRecord);
+        assert.ok(botReadyAccount, 'bot-created account should accept its modal password update');
+
         const discordUser = {
             id: '123456789',
             username: 'tester',
@@ -279,54 +343,69 @@ async function testDiscordOAuthCreatesLinkedAccount(): Promise<void> {
         const result = await completeDiscordLogin(adapter, discordUser, true, sentDms);
         const expectedEmail = 'tester@example.com';
 
-        assert.equal(result.ok, true, 'Discord OAuth should create a game account');
-        assert.equal(result.reason, 'created', 'first OAuth login should report account creation');
-        assert.equal(result.account.email, expectedEmail, 'created account should use the Discord email directly');
-        assert.equal(result.account.emailAliases, undefined, 'no alias is needed when the account email is the Discord email');
-        assert.equal(result.account.discordId, '123456789', 'Discord id should be stored');
+        assert.equal(result.ok, true, 'Discord OAuth should log into a bot-created game account');
+        assert.equal(result.reason, 'ok', 'existing linked account login should report success');
+        assert.equal(result.account.email, expectedEmail, 'login should keep the bot-created account email');
+        assert.equal(result.account.user_id, created.user_id, 'login should reuse the bot-created user id');
+        assert.equal(result.account.discordId, '123456789', 'Discord id should stay linked');
         assert.equal(result.account.discordEmail, 'tester@example.com', 'Discord email should be stored separately');
         assert.equal(result.account.discordEmailVerified, true, 'verified email state should be stored');
-        assert.equal(result.account.discordUsername, 'tester', 'Discord username should be stored');
-        assert.equal(result.account.discordDisplayName, 'Tester Display', 'Discord display name should be stored');
-        assert.equal(result.account.discordSyncRequired, true, 'Discord sync must remain mandatory');
+        assert.equal(result.account.discordUsername, 'tester', 'OAuth login should refresh Discord username metadata');
+        assert.equal(result.account.discordDisplayName, 'Tester Display', 'OAuth login should refresh display name metadata');
         assert.equal(result.account.sponsorStatus, 'active', 'sponsor status should be stored from Mongo eligibility');
         assert.equal(result.account.sponsorEligible, true, 'sponsor eligibility should be stored from Mongo eligibility');
         assert.equal(result.account.isSponsor, true, 'isSponsor should mirror Mongo sponsor eligibility');
         assert.equal(result.account.sponsorSource, 'mongodb:test.minidb', 'sponsor source should be stored');
-        assert.equal(typeof result.account.passwordHash, 'string', 'OAuth bootstrap should store a DM-delivered password hash');
-        assert.equal(sentDms.length, 1, 'OAuth bootstrap should send generated credentials by DM');
-        assert.equal(sentDms[0].discordUserId, '123456789', 'credential DM should target the OAuth Discord user');
-        assert.doesNotMatch(sentDms[0].content, /`/, 'credential DM should render the password as plain text');
-        const dmPassword = /^Password: ([A-Za-z0-9]+)$/m.exec(sentDms[0].content)?.[1] ?? '';
-        assert.ok(dmPassword, 'credential DM should include the generated password');
-        assert.equal(
-            await verifyPassword(deriveClientPasswordDigest(dmPassword), result.account),
-            true,
-            'DM password must verify against the digest the game client sends'
-        );
+        assert.equal(result.account.passwordHash, botReadyAccount?.passwordHash, 'OAuth login must not replace the bot-set password');
+        assert.equal(sentDms.length, 0, 'game OAuth login must not generate or DM a password');
 
         const accounts = await readAccounts(accountsPath);
-        assert.equal(accounts.length, 1, 'one account should be written');
+        assert.equal(accounts.length, 1, 'OAuth login must not create another account');
         await fs.access(path.join(savesDir, `${result.account.user_id}.json`));
     } finally {
         await fs.rm(dataDir, { recursive: true, force: true });
     }
 }
 
-async function testDiscordOAuthRejectsNonSponsorAccountCreation(): Promise<void> {
+async function testDiscordOAuthRejectsMissingBotAccount(): Promise<void> {
     const { adapter, dataDir, accountsPath } = await createTempAdapter();
     try {
         const result = await completeDiscordLogin(adapter, {
-            id: 'non-sponsor',
+            id: 'missing-account',
             username: 'tester',
-            email: 'nonsponsor@example.com',
+            email: 'missing@example.com',
+            verified: true
+        });
+
+        assert.equal(result.ok, false, 'game OAuth must not create a missing account');
+        assert.equal(result.reason, 'account-not-found');
+        assert.match(result.message ?? '', /\/create-account/, 'failure should point players to the Discord command');
+        const accounts = await readAccounts(accountsPath);
+        assert.equal(accounts.length, 0, 'missing game OAuth account must not write an account');
+    } finally {
+        await fs.rm(dataDir, { recursive: true, force: true });
+    }
+}
+
+async function testExistingDiscordAccountCanQuickLoginWithoutSponsorRefresh(): Promise<void> {
+    const { adapter, dataDir, accountsPath } = await createTempAdapter();
+    try {
+        const created = await adapter.createDiscordAccount('existing@example.com', {
+            id: 'existing-non-sponsor',
+            username: 'existing',
+            email: 'existing@example.com',
+            emailVerified: true
+        });
+        const result = await completeDiscordLogin(adapter, {
+            id: 'existing-non-sponsor',
+            username: 'existing',
+            email: 'existing@example.com',
             verified: true
         }, false);
 
-        assert.equal(result.ok, false, 'non-sponsor Discord OAuth should not create a game account');
-        assert.equal(result.reason, 'sponsor-verification-required');
-        const accounts = await readAccounts(accountsPath);
-        assert.equal(accounts.length, 0, 'non-sponsor Discord OAuth must not write an account');
+        assert.equal(result.ok, true, 'an existing linked account should not be blocked by account-creation eligibility');
+        assert.equal(result.account.user_id, created.user_id);
+        assert.equal((await readAccounts(accountsPath)).length, 1, 'quick login must keep one existing account');
     } finally {
         await fs.rm(dataDir, { recursive: true, force: true });
     }
@@ -335,6 +414,12 @@ async function testDiscordOAuthRejectsNonSponsorAccountCreation(): Promise<void>
 async function testRepeatedDiscordLoginReusesSameAccount(): Promise<void> {
     const { adapter, dataDir, accountsPath } = await createTempAdapter();
     try {
+        const created = await adapter.createDiscordAccount('repeat@example.com', {
+            id: '42',
+            username: 'created-by-bot',
+            email: 'repeat@example.com',
+            emailVerified: true
+        });
         const first = await completeDiscordLogin(adapter, {
             id: '42',
             username: 'first',
@@ -351,6 +436,7 @@ async function testRepeatedDiscordLoginReusesSameAccount(): Promise<void> {
         });
 
         assert.equal(second.ok, true, 'repeated Discord login should succeed');
+        assert.equal(first.account.user_id, created.user_id, 'first quick login should reuse the bot-created account');
         assert.equal(second.account.user_id, first.account.user_id, 'repeated Discord login should reuse the account');
         assert.equal(second.account.discordUsername, 'second', 'repeated Discord login should refresh Discord metadata');
         const accounts = await readAccounts(accountsPath);
@@ -444,9 +530,11 @@ async function testMissingOrUnverifiedDiscordEmailDoesNotCreateAccount(): Promis
 async function main(): Promise<void> {
     await testDiscordRoutesDisabled();
     await testDiscordClientLaunchRedirect();
+    await testServedHostBootstrapsPendingDiscordLogin();
     await testDiscordCallbackStoresPendingLoginWhenClientIsNotOpen();
-    await testDiscordOAuthCreatesLinkedAccount();
-    await testDiscordOAuthRejectsNonSponsorAccountCreation();
+    await testDiscordOAuthLogsIntoBotCreatedLinkedAccount();
+    await testDiscordOAuthRejectsMissingBotAccount();
+    await testExistingDiscordAccountCanQuickLoginWithoutSponsorRefresh();
     await testRepeatedDiscordLoginReusesSameAccount();
     await testDiscordAccountLinkGuards();
     await testMissingOrUnverifiedDiscordEmailDoesNotCreateAccount();
