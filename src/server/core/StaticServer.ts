@@ -57,6 +57,7 @@ export class StaticServer {
     private readonly selectedAssetVersion = 'cbp';
     private readonly flashVersion = this.selectedAssetVersion;
     private readonly gameVersion = this.selectedAssetVersion;
+    private readonly clientRevision = 'maintenance-command-1';
 
     private static shouldLog(): boolean {
         return process.env.DEBUG_STATIC_SERVER === '1';
@@ -103,17 +104,18 @@ export class StaticServer {
     }
 
     private getSelectedSwfUrl(): string {
-        return `/p/${this.selectedAssetVersion}/DungeonBlitz.swf?fv=${this.flashVersion}&gv=${this.gameVersion}`;
+        return `/p/${this.selectedAssetVersion}/DungeonBlitz.swf?fv=${this.flashVersion}&gv=${this.gameVersion}&clientrev=${this.clientRevision}`;
     }
 
     private getCanonicalSelectedSwfUrl(req?: Request): string {
         const params = new URLSearchParams();
         params.set('fv', this.flashVersion);
         params.set('gv', this.gameVersion);
+        params.set('clientrev', this.clientRevision);
 
         if (req) {
             for (const [key, rawValue] of Object.entries(req.query)) {
-                if (key === 'fv' || key === 'gv') {
+                if (key === 'fv' || key === 'gv' || key === 'clientrev') {
                     continue;
                 }
 
@@ -132,7 +134,8 @@ export class StaticServer {
 
     private isCanonicalSelectedSwfRequest(req: Request): boolean {
         return String(req.query.fv ?? '') === this.flashVersion &&
-            String(req.query.gv ?? '') === this.gameVersion;
+            String(req.query.gv ?? '') === this.gameVersion &&
+            String(req.query.clientrev ?? '') === this.clientRevision;
     }
 
     private normalizeLocale(value: unknown): 'en' | 'tr' | null {

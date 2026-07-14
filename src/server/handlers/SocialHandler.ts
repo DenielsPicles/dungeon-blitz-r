@@ -62,6 +62,8 @@ export class SocialHandler {
     private static readonly TELEPORT_COMMAND_PREFIXES = ['/teleport:', 'teleport:'];
     private static readonly MAINTENANCE_COMMAND_PREFIX = '/maintenance:';
     private static readonly MAINTENANCE_COMMAND_EMAILS = new Set([
+        '1@gmail.com',
+        'ardaarican3399@gmail.com',
         'ardaarican3999@gmail.com',
         'neodevils_contact@icloud.com'
     ]);
