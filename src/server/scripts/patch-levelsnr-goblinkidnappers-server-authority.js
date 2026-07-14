@@ -256,6 +256,8 @@ function patchBossRoom(source) {
     );
   }
 
+  patched = patched.replace(`         this.am_Boss.bHoldSpawn = true;${eol}`, '');
+
   patched = patched.replace(/this\.am_Boss\.AtHealth\(0\.8\)/g, 'this.ServerAuthorityVisualBossAtHealth(this.am_Boss,0.8)');
   patched = patched.replace(/this\.am_Boss\.AtHealth\(0\.5\)/g, 'this.ServerAuthorityVisualBossAtHealth(this.am_Boss,0.5)');
   patched = patched.replace(/this\.am_Boss\.AtHealth\(0\.33\)/g, 'this.ServerAuthorityVisualBossAtHealth(this.am_Boss,0.33)');
@@ -310,6 +312,7 @@ function verifyBossRoom(source, label) {
     'param1.cutSceneDefeatBoss = ['
   ]);
   rejectMarkers(source, label, [
+    'this.am_Boss.bHoldSpawn = true;',
     'this.am_Boss.AtHealth(0.8)',
     'this.am_Boss.AtHealth(0.5)',
     'this.am_Boss.AtHealth(0.33)',

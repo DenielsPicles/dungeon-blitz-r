@@ -11,6 +11,7 @@ import { MissionLoader } from '../data/MissionLoader';
 import { NpcLoader } from '../data/NpcLoader';
 import { MissionID } from '../data/runtime';
 import { LevelHandler } from '../handlers/LevelHandler';
+import { CombatHandler } from '../handlers/CombatHandler';
 import { EntityHandler } from '../handlers/EntityHandler';
 import { MissionHandler } from '../handlers/MissionHandler';
 import { BitBuffer } from '../network/protocol/bitBuffer';
@@ -295,6 +296,79 @@ function testOnlyTagUgoIsServerSpawned(): void {
     }
 }
 
+function testTagUgoUsesCanonicalServerStatsAndHpSync(): void {
+    const client = createFakeClient('CanonicalTagUgo', 61008);
+    const bossNpc = NpcLoader.getNpcsForLevel('TutorialDungeon')
+        .find((npc) => npc.id === TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
+    assert.ok(bossNpc, 'Tag Ugo server NPC should be available');
+    assert.equal(
+        EntityHandler.usesServerAuthorityHostiles('TutorialDungeon'),
+        true,
+        'Goblin Kidnappers should use the same canonical hostile authority contract as East Wing'
+    );
+
+    const canonicalBoss = (EntityHandler as any).createServerAuthorityEntityFromNpc(
+        client,
+        'TutorialDungeon',
+        bossNpc
+    );
+    assert.equal(canonicalBoss.id, TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
+    assert.equal(canonicalBoss.clientSpawned, false);
+    assert.equal(canonicalBoss.level, EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL);
+    assert.ok(canonicalBoss.maxHp > 0, 'Tag Ugo should receive canonical server max HP');
+    assert.equal(canonicalBoss.hp, canonicalBoss.maxHp, 'Tag Ugo should begin at canonical full HP');
+    assert.equal(
+        (CombatHandler as any).isServerAuthoritySyncNpc(
+            getClientLevelScope(client as never),
+            canonicalBoss
+        ),
+        true,
+        'Tag Ugo should use authoritative multiplayer HP synchronization'
+    );
+}
+
+function testTagUgoUsesOneClientVisualBackedByCanonicalServerBoss(): void {
+    const client = createFakeClient('TagUgoVisual', 61009);
+    resetFor(client);
+    GlobalState.sessionsByToken.set(client.token, client as never);
+
+    EntityHandler.sendInitialLevelEntities(client as never, 'TutorialDungeon');
+
+    const scope = getClientLevelScope(client as never);
+    const levelMap = GlobalState.levelEntities.get(scope);
+    const canonicalBoss = levelMap?.get(TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
+    assert.ok(canonicalBoss, 'Tag Ugo canonical server boss should be seeded for the dungeon run');
+    assert.equal(canonicalBoss.clientSpawned, false);
+    assert.equal(
+        packetCount(client, 0x0F),
+        0,
+        'canonical Tag Ugo must remain hidden so it cannot duplicate the cinematic client cue'
+    );
+
+    client.sentPackets.length = 0;
+    EntityHandler.handleEntityFullUpdate(
+        client as never,
+        buildHostileFullUpdate(TutorialDungeonMechanics.TAG_UGO_BOSS_ID, 'GoblinBoss1', 11)
+    );
+
+    const visualBoss = client.entities.get(TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
+    assert.ok(visualBoss, 'the cinematic client cue should become the sole local Tag Ugo visual');
+    assert.equal(visualBoss.clientSpawned, true);
+    assert.equal(visualBoss.canonicalEntityId, TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
+    assert.equal(visualBoss.level, EntityHandler.SERVER_AUTHORITY_ENTITY_LEVEL);
+    assert.equal(visualBoss.maxHp, canonicalBoss.maxHp, 'visual boss should inherit canonical server stats');
+    assert.equal(visualBoss.hp, canonicalBoss.hp, 'visual boss should inherit canonical server HP');
+    assert.equal(
+        Array.from(levelMap?.values() ?? []).filter((entity: any) =>
+            Number(entity?.id ?? 0) === TutorialDungeonMechanics.TAG_UGO_BOSS_ID
+        ).length,
+        1,
+        'the shared dungeon state should contain exactly one Tag Ugo boss'
+    );
+    assert.equal(packetCount(client, 0x78), 1, 'client visual should receive one canonical initial HP sync');
+    assert.equal(packetCount(client, 0x0F), 0, 'proxy attachment must not send another visible boss spawn');
+}
+
 async function testBossDefeatWaitsForAnnaChain(): Promise<void> {
     const client = createFakeClient('KidnapperRunner', 61001);
     resetFor(client);
@@ -387,6 +461,8 @@ function testBossIntroAndThresholdsAreServerTracked(): void {
 async function main(): Promise<void> {
     ensureDataLoaded();
     testOnlyTagUgoIsServerSpawned();
+    testTagUgoUsesCanonicalServerStatsAndHpSync();
+    testTagUgoUsesOneClientVisualBackedByCanonicalServerBoss();
     testPartyLeaderSideEnemiesRemainClientPrivate();
     await testBossDefeatWaitsForAnnaChain();
     await testAnnaChainCompletesAfterBoss();

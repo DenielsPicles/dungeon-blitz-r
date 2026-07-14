@@ -16,6 +16,7 @@ import { normalizeCharacterMaterials } from '../utils/MaterialInventory';
 import { PetHandler } from './PetHandler';
 import { Config } from '../core/config';
 import { EntityHandler } from './EntityHandler';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
 
 interface RewardRequest {
     receiverId: number;
@@ -576,6 +577,32 @@ export class RewardHandler {
         return reason === 'canonical_hostile_death' || reason === 'legacy_enemy_reward';
     }
 
+    private static requiresCanonicalHostileLootContext(
+        levelName: string | null | undefined,
+        sourceEntity: any = null,
+        sourceEnemyCanonicalId: number = 0
+    ): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (!EntityHandler.usesServerAuthorityHostiles(normalizedLevel)) {
+            return false;
+        }
+        if (normalizedLevel !== 'TutorialDungeon') {
+            return true;
+        }
+
+        const canonicalId = Math.max(
+            0,
+            Math.round(Number(
+                sourceEnemyCanonicalId ||
+                sourceEntity?.canonicalEntityId ||
+                sourceEntity?.sharedCanonicalId ||
+                (!sourceEntity?.clientSpawned ? sourceEntity?.id : 0) ||
+                0
+            ))
+        );
+        return canonicalId === TutorialDungeonMechanics.TAG_UGO_BOSS_ID;
+    }
+
     private static isCanonicalDeathLootContextValid(
         levelScope: string,
         sourceEnemyCanonicalId: number,
@@ -653,9 +680,12 @@ export class RewardHandler {
             collected: false,
             collectedBy: 0
         };
-        const isServerAuthorityHostileLevel = EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope));
         if (
-            isServerAuthorityHostileLevel &&
+            RewardHandler.requiresCanonicalHostileLootContext(
+                getScopeLevelName(levelScope),
+                null,
+                metadata.sourceEnemyCanonicalId
+            ) &&
             RewardHandler.isEnemyLootReason(reason) &&
             !RewardHandler.isCanonicalDeathLootContextValid(levelScope, metadata.sourceEnemyCanonicalId, metadata.sourceEnemyLootDropNonce)
         ) {
@@ -1056,7 +1086,7 @@ export class RewardHandler {
         const caller = 'handleGrantReward';
         const levelScope = getClientLevelScope(client);
         if (
-            EntityHandler.usesServerAuthorityHostiles(client.currentLevel) &&
+            RewardHandler.requiresCanonicalHostileLootContext(client.currentLevel, sourceEntity) &&
             reason === 'legacy_enemy_reward'
         ) {
             return;
@@ -1122,7 +1152,11 @@ export class RewardHandler {
         const sourceLootDropNonce = String(options.lootDropNonce ?? '');
         const caller = String(options.caller ?? 'grantServerEnemyRewardToEligibleViewers');
         if (
-            EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope)) &&
+            RewardHandler.requiresCanonicalHostileLootContext(
+                getScopeLevelName(levelScope),
+                sourceEntity,
+                sourceEnemyCanonicalId
+            ) &&
             (
                 sourceEnemyCanonicalId !== sourceId ||
                 !RewardHandler.isCanonicalDeathLootContextValid(levelScope, sourceEnemyCanonicalId, sourceLootDropNonce)

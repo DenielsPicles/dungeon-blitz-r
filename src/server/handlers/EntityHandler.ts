@@ -54,7 +54,8 @@ export class EntityHandler {
     private static readonly SERVER_AUTHORITY_HOSTILE_LEVELS = new Set<string>([
         'AC_Mission1',
         'JC_Mini1Hard',
-        'JC_Mini2'
+        'JC_Mini2',
+        'TutorialDungeon'
     ]);
     private static readonly FIRST_SIGHT_SERVER_AUTHORITY_HOSTILE_LEVELS = new Set<string>([
         'AC_Mission1'
