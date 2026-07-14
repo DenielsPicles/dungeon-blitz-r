@@ -302,6 +302,82 @@ function testSameOwnerSequentialWaveSpawnsRemainDistinct(): void {
     assert.ok(levelMap?.has(firstId) && levelMap.has(secondId), 'same-owner sequential wave actors must coexist with independent HP/death state');
 }
 
+async function testFollowerSameTypeGoblinsMapOneToOne(): Promise<void> {
+    const leader = createFakeClient('TutorialBoat', 'follower-one-to-one-goblins', 56010);
+    const follower = createFakeClient('TutorialBoat', 'follower-one-to-one-goblins', 56011);
+    leader.currentRoomId = 2333678904;
+    follower.currentRoomId = 2333678904;
+    attachPlayer(leader);
+    attachPlayer(follower);
+    GlobalState.sessionsByToken.set(leader.token, leader as never);
+    GlobalState.sessionsByToken.set(follower.token, follower as never);
+
+    const partyId = 56_000;
+    GlobalState.partyGroups.set(partyId, {
+        id: partyId,
+        leader: leader.character.name,
+        members: [leader.character.name, follower.character.name],
+        locked: false
+    });
+    GlobalState.partyByMember.set(leader.character.name.toLowerCase(), partyId);
+    GlobalState.partyByMember.set(follower.character.name.toLowerCase(), partyId);
+    EntityHandler.sendInitialLevelEntities(leader as never, leader.currentLevel);
+    EntityHandler.sendInitialLevelEntities(follower as never, follower.currentLevel);
+
+    const leaderIds = [7_700_201, 7_700_202] as const;
+    const followerIds = [7_800_201, 7_800_202] as const;
+    for (const leaderId of leaderIds) {
+        EntityHandler.handleEntityFullUpdate(
+            leader as never,
+            buildHostileFullUpdate(leaderId, 'IntroGoblinDagger', 6300, 620, leader.currentRoomId)
+        );
+    }
+    for (const followerId of followerIds) {
+        EntityHandler.handleEntityFullUpdate(
+            follower as never,
+            buildHostileFullUpdate(followerId, 'IntroGoblinDagger', 6300, 620, follower.currentRoomId)
+        );
+    }
+
+    const firstCanonicalId = EntityHandler.resolveEntityAlias(follower as never, followerIds[0]);
+    const secondCanonicalId = EntityHandler.resolveEntityAlias(follower as never, followerIds[1]);
+    assert.notEqual(firstCanonicalId, secondCanonicalId, 'two follower goblins must not share one canonical id');
+    assert.deepEqual(
+        new Set([firstCanonicalId, secondCanonicalId]),
+        new Set(leaderIds),
+        'follower goblins must map one-to-one onto the leader goblins even at identical coordinates'
+    );
+
+    const scope = getLevelScopeKey(leader.currentLevel, leader.levelInstanceId);
+    const levelMap = GlobalState.levelEntities.get(scope);
+    const firstCanonical = levelMap?.get(firstCanonicalId);
+    const secondCanonical = levelMap?.get(secondCanonicalId);
+    assert.ok(firstCanonical && secondCanonical, 'both canonical goblins must exist before combat');
+    await CombatHandler.handlePowerHit(
+        follower as never,
+        buildPowerHitPayload(followerIds[0], follower.clientEntID, Math.max(1, Number(firstCanonical.maxHp ?? firstCanonical.hp ?? 1)) + 1)
+    );
+    assert.equal(Boolean(firstCanonical.dead), true, 'the targeted goblin must die');
+    assert.equal(Boolean(secondCanonical.dead), false, 'the untargeted goblin must remain alive');
+    assert.ok(Number(secondCanonical.hp ?? 0) > 0, 'the untargeted goblin must retain positive HP');
+
+    const secondHpBeforeHit = Number(secondCanonical.hp ?? 0);
+    await CombatHandler.handlePowerHit(
+        follower as never,
+        buildPowerHitPayload(followerIds[1], follower.clientEntID, 1)
+    );
+    assert.equal(Boolean(firstCanonical.dead), true, 'hitting the surviving goblin must not revive the dead goblin');
+    assert.equal(Boolean(secondCanonical.dead), false, 'the surviving goblin must remain alive after nonlethal damage');
+    assert.equal(Number(secondCanonical.hp ?? 0), secondHpBeforeHit - 1, 'damage after another goblin dies must stay isolated');
+
+    await CombatHandler.handlePowerHit(
+        follower as never,
+        buildPowerHitPayload(followerIds[1], follower.clientEntID, Number(secondCanonical.hp ?? 0) + 1)
+    );
+    assert.equal(Boolean(firstCanonical.dead), true, 'the first goblin must remain dead after the second goblin dies');
+    assert.equal(Boolean(secondCanonical.dead), true, 'the second goblin must die independently');
+}
+
 async function testWolfsEndBossProxyAndRegularHostile(levelName: 'TutorialDungeon' | 'TutorialDungeonHard'): Promise<void> {
     const client = createFakeClient(levelName, `global-boss-${levelName}`, levelName.endsWith('Hard') ? 52002 : 51001);
     attachPlayer(client);
@@ -564,6 +640,12 @@ async function main(): Promise<void> {
         GlobalState.partyByMember.clear();
         GlobalState.partyGroups.clear();
         testSameOwnerSequentialWaveSpawnsRemainDistinct();
+
+        GlobalState.levelEntities.clear();
+        GlobalState.sessionsByToken.clear();
+        GlobalState.partyByMember.clear();
+        GlobalState.partyGroups.clear();
+        await testFollowerSameTypeGoblinsMapOneToOne();
 
         GlobalState.levelEntities.clear();
         GlobalState.sessionsByToken.clear();

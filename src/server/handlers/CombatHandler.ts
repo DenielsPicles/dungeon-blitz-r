@@ -1544,6 +1544,26 @@ export class CombatHandler {
             return [];
         }
 
+        // Name/room equivalence is only a recovery path for a lone actor whose
+        // Flash proxy has a different id. When several actors of the same type
+        // coexist (goblin waves, packs, multi-boss rooms), equivalence remains
+        // ambiguous even after one dies and must not merge their HP, death,
+        // aliases, or authority.
+        let ambiguousEquivalentCanonical = false;
+        if (includeEquivalent) {
+            for (const candidate of GlobalState.levelEntities.get(levelScope)?.values() ?? []) {
+                const candidateId = Math.max(0, Math.round(Number(candidate?.id ?? 0)));
+                if (
+                    candidateId > 0 &&
+                    candidateId !== entityId &&
+                    CombatHandler.isEquivalentHostileEntity(levelScope, entity, candidate)
+                ) {
+                    ambiguousEquivalentCanonical = true;
+                    break;
+                }
+            }
+        }
+
         if (
             isEastWingRequiredEnemy(levelScope, entity) &&
             EntityHandler.isServerAuthorityHostileEntity(levelScope, entity)
@@ -1601,7 +1621,11 @@ export class CombatHandler {
                 Boolean(candidate.isPlayer) ||
                 (
                     Math.max(0, Math.round(Number(candidate.id ?? 0))) !== entityId &&
-                    (!includeEquivalent || !CombatHandler.isEquivalentHostileEntity(levelScope, entity, candidate))
+                    (
+                        !includeEquivalent ||
+                        ambiguousEquivalentCanonical ||
+                        !CombatHandler.isEquivalentHostileEntity(levelScope, entity, candidate)
+                    )
                 )
             ) {
                 return;

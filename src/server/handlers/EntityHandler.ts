@@ -2829,9 +2829,19 @@ export class EntityHandler {
             return false;
         }
 
+        const entityRoomId = Number.isFinite(Number(entity?.roomId)) ? Math.round(Number(entity.roomId)) : -1;
         const canonical =
             (levelMap && levelMap.get(Number(entity.id ?? 0))) ??
-            EntityHandler.findLeaderAuthoritativeClientSpawnMatch(levelMap, entity);
+            (levelName && levelMap
+                ? EntityHandler.findSharedClientSpawnCanonicalMatch(
+                    levelName,
+                    levelMap,
+                    partyId,
+                    entityRoomId,
+                    entity,
+                    client.token
+                )
+                : null);
         // Non-leader suppression is only valid after a canonical shared hostile
         // already exists in-scope and can replace the follower's local spawn.
         if (!canonical) {
@@ -2932,6 +2942,18 @@ export class EntityHandler {
             // this sender as the match for a new local id; scripted waves can
             // repeatedly spawn the same type from one client.
             if (Number(candidate?.ownerToken ?? 0) === excludedOwnerToken) {
+                continue;
+            }
+            const incomingLocalId = Math.max(0, Math.round(Number(entity?.id ?? 0)));
+            const registeredLocalId = Math.max(
+                0,
+                Math.round(Number(EntityHandler.getHostileAliasMap(candidate).get(excludedOwnerToken) ?? 0))
+            );
+            if (
+                excludedOwnerToken > 0 &&
+                registeredLocalId > 0 &&
+                registeredLocalId !== incomingLocalId
+            ) {
                 continue;
             }
             if (partyId > 0) {
