@@ -57,6 +57,7 @@ import {
 import { markRoomBossEntity } from '../core/RoomBossState';
 import { getCharacterRuntimeLevel, getPartyRuntimeLevelForClient } from '../core/RuntimeLevel';
 import { getCraftTownHomeInstanceId } from '../utils/HomeVisitGuard';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
 
 const db = new JsonAdapter();
 
@@ -4817,6 +4818,7 @@ export class LevelHandler {
         LevelHandler.cacheRoomId(client, roomId);
         const bossId = br.readMethod9();
         const bossName = br.readMethod26();
+        TutorialDungeonMechanics.noteBossIntroStarted(client, bossId, bossName);
         br.readMethod9();
         br.readMethod26();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {

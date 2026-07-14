@@ -28,6 +28,7 @@ import { LevelConfig } from '../core/LevelConfig';
 import { isRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import { RewardHandler } from './RewardHandler';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
 
 type CombatRelayOptions = {
     includeAnchor?: boolean;
@@ -4744,6 +4745,9 @@ export class CombatHandler {
             );
             CombatHandler.assignPartySharedHostileCombatAuthority(levelScope, targetEntity, sourceSession);
             const resolution = CombatHandler.updateNpcTargetAfterHit(levelScope, targetId, damage);
+            if (resolution.entity) {
+                TutorialDungeonMechanics.noteBossHealth(sourceSession, resolution.entity);
+            }
             if (resolution.killed && resolution.entity && !deferDungeonCompletionUntilDestroy) {
                 CombatHandler.handleEnemyDefeatState(sourceSession, levelScope, targetId, resolution.entity);
             }
@@ -5268,6 +5272,7 @@ export class CombatHandler {
         }
 
         CombatHandler.markEnemyDefeatProcessed(levelScope, entityId, entity);
+        TutorialDungeonMechanics.noteEntityDefeated(client, entity);
         CombatHandler.handleCanonicalVisibleServerAuthorityDefeatSideEffects(client, levelScope, entity);
         CombatHandler.fireAndForgetMissionWork(
             client,
@@ -5612,6 +5617,7 @@ export class CombatHandler {
             const hpBefore = Math.max(0, Math.round(Number(targetEntity?.hp ?? 0)));
             const resolution = CombatHandler.updateNpcTargetAfterHit(levelScope, targetId, damage);
             if (resolution.entity && Math.max(0, Math.round(Number(resolution.appliedDamage ?? 0))) > 0) {
+                TutorialDungeonMechanics.noteBossHealth(sourceSession ?? client, resolution.entity);
                 CombatHandler.logHpMutation(
                     'powerhit',
                     sourceSession ?? client,
@@ -6879,6 +6885,7 @@ export class CombatHandler {
         const hpBefore = Math.max(0, Math.round(Number(targetEntity?.hp ?? 0)));
         const resolution = CombatHandler.updateNpcTargetAfterHit(levelScope, targetId, damage);
         if (resolution.entity && Math.max(0, Math.round(Number(resolution.appliedDamage ?? 0))) > 0) {
+            TutorialDungeonMechanics.noteBossHealth(sourceSession ?? client, resolution.entity);
             CombatHandler.logHpMutation(
                 'buff-tick-dot',
                 sourceSession ?? client,

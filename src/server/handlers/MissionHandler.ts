@@ -28,6 +28,7 @@ import {
     resolveSharedDungeonProgressAuthorityToken,
     usesSharedDungeonProgress
 } from '../core/SharedDungeonProgress';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
 import { Character } from '../database/Database';
 import { MissionDef, MissionLoader } from '../data/MissionLoader';
 import { NpcLoader } from '../data/NpcLoader';
@@ -141,6 +142,7 @@ export class MissionHandler {
     ]);
     private static readonly DUNGEONS_REQUIRING_BOSS_DEFEAT = new Set([
         'CraftTownTutorial',
+        'TutorialDungeon',
         'AC_Mission6',
         'AC_Mission6Hard',
         'BT_Mission1',
@@ -168,6 +170,7 @@ export class MissionHandler {
     ]);
     private static readonly REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL: Record<string, ReadonlySet<string>> = {
         CraftTownTutorial: new Set(['GoblinShamanHood']),
+        TutorialDungeon: new Set(['GoblinBoss1']),
         AC_Mission2: new Set(['DreadLord']),
         AC_Mission2Hard: new Set(['DreadLordHard']),
         AC_Mission5: new Set(['AncientDragonBlack', 'AncientDragonSilver']),
@@ -196,6 +199,10 @@ export class MissionHandler {
     private static readonly REQUIRED_DUNGEON_BOSS_NAME_ALIASES_BY_LEVEL: Record<string, ReadonlyMap<string, string>> = {
         CraftTownTutorial: new Map([
             ['IntroGoblinShamanHood', 'GoblinShamanHood']
+        ]),
+        TutorialDungeon: new Map([
+            ['Tag Ugo', 'GoblinBoss1'],
+            ['TagUgo', 'GoblinBoss1']
         ]),
         GhostBossDungeon: new Map([
             ['Nephit', 'NephitLargeEye'],
@@ -1837,6 +1844,10 @@ export class MissionHandler {
             return;
         }
 
+        if (currentLevel === 'TutorialDungeon') {
+            TutorialDungeonMechanics.noteEntityDefeated(client, destroyedEntity);
+        }
+
         if (currentLevel === 'CraftTownTutorial') {
             if (!MissionHandler.isCraftTownTutorialBossEntity(destroyedEntity)) {
                 return;
@@ -1914,6 +1925,10 @@ export class MissionHandler {
         const levelScope = getClientLevelScope(client);
         if (!levelScope || client.forcedDungeonCompletionScope === levelScope) {
             return;
+        }
+
+        if (currentLevel === 'TutorialDungeon') {
+            TutorialDungeonMechanics.noteEntityDefeated(client, destroyedEntity);
         }
 
         if (!MissionHandler.isRequiredDungeonChestEntity(currentLevel, destroyedEntity)) {
@@ -3836,6 +3851,9 @@ export class MissionHandler {
 
     private static isRequiredDungeonChestEntity(levelName: string | null | undefined, entity: any): boolean {
         const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (normalizedLevel === 'TutorialDungeon') {
+            return TutorialDungeonMechanics.isAnnaRescueObjective(normalizedLevel, entity);
+        }
         if (!normalizedLevel || !MissionHandler.requiresBossAndChestCompletionForDungeon(normalizedLevel)) {
             return false;
         }
@@ -4124,6 +4142,10 @@ export class MissionHandler {
         levelName: string | null | undefined,
         levelScope: string | null | undefined
     ): boolean {
+        if (LevelConfig.normalizeLevelName(levelName) === 'TutorialDungeon') {
+            return TutorialDungeonMechanics.hasCompletionObjectives(levelScope);
+        }
+
         if (!MissionHandler.requiresBossAndChestCompletionForDungeon(levelName)) {
             return MissionHandler.hasDefeatedDungeonBoss(client, levelScope) &&
                 !MissionHandler.hasAliveRequiredDungeonBossInCompletionRoom(levelScope, levelName);

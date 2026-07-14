@@ -4141,6 +4141,7 @@ export class EntityHandler {
             if (entityProps?.isPlayer) continue;
             if (EntityHandler.isEntityDead(entityProps)) continue;
             if (entityProps?.clientSpawned) continue;
+            if ((entityProps as any)?.serverOnlyObjective) continue;
             EntityHandler.normalizeServerAuthorityHostileState(levelName, entityProps);
             if (EntityHandler.isServerAuthorityHostileEntity(levelName, entityProps)) {
                 noteDungeonRunEntitySeen(client, id, entityProps);
