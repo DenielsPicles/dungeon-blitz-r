@@ -4709,6 +4709,7 @@ export class LevelHandler {
                 sourceDoorId: doorContext?.sourceDoorId,
                 sourceDoorLevel: doorContext?.sourceLevel,
                 sourceDoorTargetLevel: doorContext?.targetLevel,
+                pendingSince: Date.now(),
                 playSessionStartedAt: Number.isFinite(Number(playSessionStartedAt ?? syncState?.playSessionStartedAt)) &&
                     Number(playSessionStartedAt ?? syncState?.playSessionStartedAt) > 0
                     ? Math.round(Number(playSessionStartedAt ?? syncState?.playSessionStartedAt))

@@ -340,6 +340,106 @@ async function testConcurrentEmailIdentityFails(accountsPath: string, savesDir: 
     }
 }
 
+async function testStalePendingWorldIdentityDoesNotBlockLogin(accountsPath: string, savesDir: string): Promise<void> {
+    const accounts = await readAccounts(accountsPath);
+    accounts.push({
+        email: 'fresh-pending@example.com',
+        user_id: 8,
+        ...(await hashPlaintextPasswordForClient('fresh-password'))
+    });
+    accounts.push({
+        email: 'stale-pending@example.com',
+        user_id: 9,
+        ...(await hashPlaintextPasswordForClient('stale-password'))
+    });
+    await fs.writeFile(accountsPath, JSON.stringify(accounts, null, 2));
+    await fs.writeFile(path.join(savesDir, '8.json'), JSON.stringify({
+        user_id: 8,
+        characters: [{ name: 'FreshPendingHero', class: 'warrior', gender: 'male', level: 1 }]
+    }, null, 2));
+    await fs.writeFile(path.join(savesDir, '9.json'), JSON.stringify({
+        user_id: 9,
+        characters: [{ name: 'StalePendingHero', class: 'mage', gender: 'female', level: 1 }]
+    }, null, 2));
+
+    const freshToken = 800008;
+    const staleToken = 900009;
+    const staleAliasToken = 900010;
+    try {
+        GlobalState.pendingWorld.set(freshToken, {
+            userId: 8,
+            account: { email: 'fresh-pending@example.com', user_id: 8 },
+            accountEmail: 'fresh-pending@example.com',
+            character: { name: 'FreshPendingHero' },
+            targetLevel: 'NewbieRoad',
+            previousLevel: 'NewbieRoad',
+            pendingSince: Date.now()
+        } as any);
+        GlobalState.pendingExtended.set(freshToken, true);
+
+        const freshClient = createFakeClient('127.0.0.8');
+        await LoginHandler.handleLoginAuthenticate(
+            freshClient as any,
+            buildLoginPacket('fresh-pending@example.com', 'fresh-password')
+        );
+
+        assertLoginFailed(freshClient, 'fresh pending transfer lock');
+        assert.equal(getLastPopupMessage(freshClient), CONCURRENT_ACCOUNT_EMAIL_MESSAGE);
+        assert.equal(GlobalState.pendingWorld.has(freshToken), true, 'fresh pending transfer should stay available');
+
+        GlobalState.pendingWorld.set(staleToken, {
+            userId: 9,
+            account: { email: 'stale-pending@example.com', user_id: 9 },
+            accountEmail: 'stale-pending@example.com',
+            character: { name: 'StalePendingHero' },
+            targetLevel: 'NewbieRoad',
+            previousLevel: 'NewbieRoad',
+            playSessionStartedAt: Date.now() - 120_000
+        } as any);
+        GlobalState.pendingExtended.set(staleToken, true);
+        GlobalState.pendingTeleports.set(staleToken, {} as any);
+        GlobalState.houseVisits.set(staleToken, { name: 'StalePendingHero' } as any);
+        GlobalState.tokenChar.set(staleToken, { character: { name: 'StalePendingHero' } as any, userId: 9 });
+        GlobalState.usedTransferTokens.set(staleToken, {
+            userId: 9,
+            account: { email: 'stale-pending@example.com', user_id: 9 },
+            accountEmail: 'stale-pending@example.com',
+            character: { name: 'StalePendingHero' },
+            targetLevel: 'NewbieRoad',
+            previousLevel: 'NewbieRoad'
+        } as any);
+        GlobalState.transferTokenAliases.set(staleAliasToken, staleToken);
+
+        const staleClient = createFakeClient('127.0.0.9');
+        await LoginHandler.handleLoginAuthenticate(
+            staleClient as any,
+            buildLoginPacket('stale-pending@example.com', 'stale-password')
+        );
+
+        assert.equal(staleClient.authenticated, true, 'stale pending transfer must not block login');
+        assert.equal(staleClient.userId, 9, 'stale pending login should set the account user id');
+        assert.equal(staleClient.sentPackets.some((packet) => packet.id === 0x15), true, 'stale pending login should send character list');
+        assert.equal(GlobalState.pendingWorld.has(staleToken), false, 'stale pending transfer should be pruned');
+        assert.equal(GlobalState.pendingExtended.has(staleToken), false, 'stale extended transfer marker should be pruned');
+        assert.equal(GlobalState.pendingTeleports.has(staleToken), false, 'stale pending teleport should be pruned');
+        assert.equal(GlobalState.houseVisits.has(staleToken), false, 'stale house visit should be pruned');
+        assert.equal(GlobalState.tokenChar.has(staleToken), false, 'stale token character entry should be pruned');
+        assert.equal(GlobalState.usedTransferTokens.has(staleToken), false, 'stale used transfer token should be pruned');
+        assert.equal(GlobalState.transferTokenAliases.has(staleAliasToken), false, 'stale transfer alias should be pruned');
+    } finally {
+        GlobalState.pendingWorld.delete(freshToken);
+        GlobalState.pendingExtended.delete(freshToken);
+        GlobalState.pendingWorld.delete(staleToken);
+        GlobalState.pendingExtended.delete(staleToken);
+        GlobalState.pendingTeleports.delete(staleToken);
+        GlobalState.houseVisits.delete(staleToken);
+        GlobalState.tokenChar.delete(staleToken);
+        GlobalState.usedTransferTokens.delete(staleToken);
+        GlobalState.transferTokenAliases.delete(staleToken);
+        GlobalState.transferTokenAliases.delete(staleAliasToken);
+    }
+}
+
 async function testDiscordLinkedAccountWithoutHashFails(adapter: JsonAdapter): Promise<void> {
     const email = deriveDiscordAccountEmail('nopassword@example.com', 'no-pass');
     await adapter.createDiscordAccount(email, {
@@ -503,6 +603,7 @@ async function main(): Promise<void> {
         await testUnknownAndEmptyPasswordFail();
         await testPasswordLoginAllowsPasswordOnlyAccount(accountsPath, savesDir);
         await testConcurrentEmailIdentityFails(accountsPath, savesDir);
+        await testStalePendingWorldIdentityDoesNotBlockLogin(accountsPath, savesDir);
         await testDiscordLinkedAccountWithoutHashFails(LoginHandler.db);
         await testAliasResetPreservesSave(accountsPath, savesDir, expectedEmail);
         await testPendingDiscordOAuthLoginDelaysCharacterListAfterVersion(accountsPath, savesDir);

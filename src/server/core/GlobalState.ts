@@ -28,6 +28,7 @@ export interface PendingTransfer {
     sourceDoorId?: number;
     sourceDoorLevel?: string;
     sourceDoorTargetLevel?: string;
+    pendingSince?: number;
     playSessionStartedAt?: number;
 }
 

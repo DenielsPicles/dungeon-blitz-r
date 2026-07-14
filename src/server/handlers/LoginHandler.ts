@@ -5,7 +5,7 @@ import { Config } from '../core/config';
 import * as crypto from 'crypto';
 import { JsonAdapter } from '../database/JsonAdapter';
 import { UserAccount } from '../database/Database';
-import { GlobalState } from '../core/GlobalState';
+import { GlobalState, PendingTransfer } from '../core/GlobalState';
 import {
     isValidPasswordInput,
     normalizeAccountIdentifier,
@@ -27,6 +27,7 @@ export class LoginHandler {
     public static db: JsonAdapter = new JsonAdapter();
     private static readonly discordOAuthAutoAuthenticatedClients = new WeakSet<Client>();
     private static readonly DISCORD_OAUTH_CHARACTER_LIST_RETRY_MS = 500;
+    private static readonly PENDING_WORLD_LOGIN_LOCK_TTL_MS = 60 * 1000;
 
     private static issueChallenge(client: Client): string {
         const sid = crypto.randomInt(0, 65536);
@@ -79,6 +80,35 @@ export class LoginHandler {
         client.character = null;
     }
 
+    private static isFreshPendingWorldLoginLock(entry: PendingTransfer, now: number = Date.now()): boolean {
+        const pendingSince = Number(entry.pendingSince ?? entry.playSessionStartedAt ?? 0);
+        if (!Number.isFinite(pendingSince) || pendingSince <= 0) {
+            return true;
+        }
+
+        return now - Math.round(pendingSince) <= LoginHandler.PENDING_WORLD_LOGIN_LOCK_TTL_MS;
+    }
+
+    private static clearStalePendingWorldLoginLock(token: number, entry: PendingTransfer, accountEmail: string): void {
+        GlobalState.pendingWorld.delete(token);
+        GlobalState.pendingExtended.delete(token);
+        GlobalState.pendingTeleports.delete(token);
+        GlobalState.tokenChar.delete(token);
+        GlobalState.usedTransferTokens.delete(token);
+        GlobalState.houseVisits.delete(token);
+        GlobalState.transferTokenAliases.delete(token);
+        for (const [aliasToken, targetToken] of Array.from(GlobalState.transferTokenAliases.entries())) {
+            if (targetToken === token) {
+                GlobalState.transferTokenAliases.delete(aliasToken);
+            }
+        }
+
+        const characterName = String(entry.character?.name ?? '').trim() || '(unknown)';
+        console.warn(
+            `[Login] Cleared stale pending world login lock for ${accountEmail} token=${token} character=${characterName}`
+        );
+    }
+
     public static async findActiveAccountIdentityConflict(
         account: UserAccount,
         excludedClient?: Client | null
@@ -106,25 +136,29 @@ export class LoginHandler {
             }
         }
 
-        for (const entry of GlobalState.pendingWorld.values()) {
+        const now = Date.now();
+        for (const [token, entry] of Array.from(GlobalState.pendingWorld.entries())) {
+            let matchesAccountIdentity = false;
             if (accountUserId > 0 && entry.userId === accountUserId) {
-                return true;
-            }
-
-            if (GlobalState.accountsShareIdentity(entry.account, account)) {
-                return true;
-            }
-
-            if (entry.accountEmail && GlobalState.accountsShareIdentity({ email: entry.accountEmail }, account)) {
-                return true;
-            }
-
-            if (entry.userId > 0) {
+                matchesAccountIdentity = true;
+            } else if (GlobalState.accountsShareIdentity(entry.account, account)) {
+                matchesAccountIdentity = true;
+            } else if (entry.accountEmail && GlobalState.accountsShareIdentity({ email: entry.accountEmail }, account)) {
+                matchesAccountIdentity = true;
+            } else if (entry.userId > 0) {
                 const pendingAccount = await LoginHandler.db.getAccountById(entry.userId);
-                if (GlobalState.accountsShareIdentity(pendingAccount, account)) {
-                    return true;
-                }
+                matchesAccountIdentity = GlobalState.accountsShareIdentity(pendingAccount, account);
             }
+
+            if (!matchesAccountIdentity) {
+                continue;
+            }
+
+            if (LoginHandler.isFreshPendingWorldLoginLock(entry, now)) {
+                return true;
+            }
+
+            LoginHandler.clearStalePendingWorldLoginLock(token, entry, account.email);
         }
 
         return null;

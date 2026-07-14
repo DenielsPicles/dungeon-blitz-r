@@ -1129,6 +1129,7 @@ export class CharacterHandler {
                 syncEntryY: storedDungeonSnapshot?.entryHasCoord ? storedDungeonSnapshot.entryY : undefined,
                 syncEntryHasCoord: Boolean(storedDungeonSnapshot?.entryHasCoord),
                 syncQuestProgress,
+                pendingSince: Date.now(),
                 playSessionStartedAt: Date.now()
             });
             GlobalState.pendingExtended.set(token, true);
