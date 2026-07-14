@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.8.4",
+  "version": "1.9.3",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -16,7 +16,9 @@
     "reset-password": "ts-node scripts/set_account_password.ts",
     "migrate:game-data-to-mongo": "node --env-file-if-exists=.env -r ts-node/register scripts/migrate_game_data_to_mongo.ts",
     "validate:east-wing-spawns": "node tools/exportTheEastWingEnemies.js",
-    "validate:dungeon-spawns": "node tools/exportTheEastWingEnemies.js"
+    "validate:dungeon-spawns": "node tools/exportTheEastWingEnemies.js",
+    "export:goblin-kidnappers-spawns": "node tools/exportGoblinKidnappersEnemies.js",
+    "test:goblin-kidnappers-authority": "ts-node --transpile-only test/goblin_kidnappers_server_authority_regression.ts"
   },
   "keywords": [],
   "author": "",

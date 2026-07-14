@@ -26,7 +26,7 @@ import { NpcLoader, NpcDef } from '../data/NpcLoader';
 import { DialogueTranslationLoader } from '../data/DialogueTranslationLoader';
 import { MissionID } from '../data/runtime';
 import { Entity, EntityState, EntityTeam } from '../core/Entity';
-import { Character } from '../database/Database';
+import { Character, UserAccount } from '../database/Database';
 import { EntityHandler } from './EntityHandler';
 import { MissionHandler } from './MissionHandler';
 import { PetHandler } from './PetHandler';
@@ -54,7 +54,7 @@ import {
     getScopeLevelName,
     normalizeLevelInstanceId
 } from '../core/LevelScope';
-import { markRoomBossEntity } from '../core/RoomBossState';
+import { getRoomBossAwareRoomId, markRoomBossEntity } from '../core/RoomBossState';
 import { getCharacterRuntimeLevel, getPartyRuntimeLevelForClient } from '../core/RuntimeLevel';
 import { getCraftTownHomeInstanceId } from '../utils/HomeVisitGuard';
 import {
@@ -63,6 +63,7 @@ import {
     logEastWingEnemyMutation,
     logEastWingProgressBlocked
 } from '../core/EastWingEnemyDebug';
+import { DungeonSession } from '../core/DungeonSession';
 
 const db = new JsonAdapter();
 
@@ -293,6 +294,8 @@ export class LevelHandler {
         target.character = source.character;
         target.craftTownHostCharacter = source.craftTownHostCharacter;
         target.userId = source.userId;
+        target.account = source.account;
+        target.authenticated = source.authenticated;
         target.characters = Array.isArray(source.characters) ? [...source.characters] : [];
         target.currentLevel = source.currentLevel;
         target.levelInstanceId = source.levelInstanceId;
@@ -1252,7 +1255,6 @@ export class LevelHandler {
     static shouldSkipDungeonRoomProgressSync(levelName: string | null | undefined): boolean {
         const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
         return LevelHandler.usesAuthoritativeQuestProgress(normalizedLevel) ||
-            normalizedLevel === 'TutorialDungeon' ||
             normalizedLevel === 'TutorialDungeonHard' ||
             normalizedLevel === 'CraftTownTutorial';
     }
@@ -1271,9 +1273,15 @@ export class LevelHandler {
         const normalizedLevel = LevelConfig.normalizeLevelName(client.currentLevel) || client.currentLevel;
 
         if (normalizedLevel === 'TutorialDungeon' || normalizedLevel === 'TutorialDungeonHard') {
-            client.currentRoomId = 0;
-            client.startedRoomEvents.clear();
-            client.character.questTrackerState = LevelHandler.TUTORIAL_DUNGEON_INITIAL_PROGRESS;
+            const sessionState = DungeonSession.getOrCreate(client);
+            if (sessionState) {
+                client.currentRoomId = sessionState.currentRoomId;
+                client.character.questTrackerState = sessionState.progressPercent;
+            } else {
+                client.currentRoomId = 0;
+                client.startedRoomEvents.clear();
+                client.character.questTrackerState = LevelHandler.TUTORIAL_DUNGEON_INITIAL_PROGRESS;
+            }
             return;
         }
 
@@ -1589,10 +1597,11 @@ export class LevelHandler {
             if (!EntityHandler.isServerAuthorityHostileEntity(levelName, entity)) {
                 continue;
             }
+            const entityRoomId = getRoomBossAwareRoomId(entity);
             if (
                 normalizedRoomId > 0 &&
-                Number.isFinite(Number(entity?.roomId)) &&
-                !sharesRoomIds(normalizedRoomId, Math.round(Number(entity.roomId)))
+                entityRoomId >= 0 &&
+                !sharesRoomIds(normalizedRoomId, entityRoomId)
             ) {
                 continue;
             }
@@ -2935,17 +2944,22 @@ export class LevelHandler {
         return bb.toBuffer();
     }
 
-    private static cacheRoomId(client: Client, roomId: number): void {
+    private static cacheRoomId(client: Client, roomId: number): number {
         if (Number.isFinite(roomId) && roomId >= 0) {
             const previousRoomId = Number.isFinite(Number(client.currentRoomId))
                 ? Math.round(Number(client.currentRoomId))
                 : -1;
-            client.currentRoomId = roomId;
-            if (previousRoomId >= 0 && previousRoomId !== roomId) {
+            const authoritativeRoomId = DungeonSession.isAuthoritativeLevel(client.currentLevel)
+                ? DungeonSession.requestRoomChange(client, roomId)
+                : roomId;
+            client.currentRoomId = authoritativeRoomId;
+            if (previousRoomId >= 0 && previousRoomId !== authoritativeRoomId) {
                 PetHandler.armMountTravelProtection(client, 4000, true);
             }
-            LevelHandler.maybeStartTutorialDungeonTraversalTutorial(client, roomId);
+            LevelHandler.maybeStartTutorialDungeonTraversalTutorial(client, authoritativeRoomId);
+            return authoritativeRoomId;
         }
+        return roomId;
     }
 
     static isGoblinRiverBossIntroLocked(client: Client): boolean {
@@ -3794,7 +3808,12 @@ export class LevelHandler {
             }
             return 'completed_duplicate';
         }
-        if (existing?.active && existing.ownerToken > 0 && existing.ownerToken !== client.token) {
+        if (
+            existing?.active &&
+            existing.ownerToken > 0 &&
+            existing.ownerToken !== client.token &&
+            !DungeonSession.isAuthoritativeLevel(client.currentLevel)
+        ) {
             return 'active_duplicate';
         }
 
@@ -4635,6 +4654,7 @@ export class LevelHandler {
         token: number,
         character: any,
         userId: number | null,
+        account: UserAccount | null | undefined,
         targetLevel: string,
         previousLevel: string,
         newX: number,
@@ -4668,6 +4688,8 @@ export class LevelHandler {
                 character,
                 craftTownHostCharacter,
                 userId,
+                account: account ?? undefined,
+                accountEmail: account?.email,
                 targetLevel,
                 levelInstanceId: levelInstanceId || undefined,
                 previousLevel,
@@ -4820,6 +4842,9 @@ export class LevelHandler {
 
             client.character = usedEntry.character;
             client.userId = usedEntry.userId;
+            client.account = usedEntry.account ?? (usedEntry.accountEmail
+                ? { email: usedEntry.accountEmail, user_id: usedEntry.userId }
+                : client.account);
             client.currentLevel = usedEntry.targetLevel;
             client.craftTownHostCharacter = usedEntry.targetLevel === 'CraftTown'
                 ? usedEntry.craftTownHostCharacter ?? null
@@ -4898,6 +4923,9 @@ export class LevelHandler {
         if (pendingEntry) {
             client.character = pendingEntry.character;
             client.userId = pendingEntry.userId;
+            client.account = pendingEntry.account ?? (pendingEntry.accountEmail
+                ? { email: pendingEntry.accountEmail, user_id: pendingEntry.userId }
+                : client.account);
             client.currentLevel = pendingEntry.targetLevel;
             client.craftTownHostCharacter = pendingEntry.targetLevel === 'CraftTown'
                 ? pendingEntry.craftTownHostCharacter ?? null
@@ -5222,6 +5250,8 @@ export class LevelHandler {
         if (client.character) {
             client.character.questTrackerState = progress;
         }
+        DungeonSession.updateProgress(levelScope, progress);
+        if (progress >= 100) DungeonSession.markCompleted(levelScope);
         noteDungeonRunCompletionProgress(client, progress);
         MissionHandler.maybeScheduleFullClearDungeonCompletionFromProgress(client, progress);
 
@@ -5254,7 +5284,7 @@ export class LevelHandler {
     static handlePlaySound(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod26();
         br.readMethod9();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
@@ -5270,7 +5300,7 @@ export class LevelHandler {
     static handleActionUpdate(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod9();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
             return;
@@ -5285,7 +5315,7 @@ export class LevelHandler {
     static handleRoomStateUpdate(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod9();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
             return;
@@ -5300,7 +5330,9 @@ export class LevelHandler {
     static handleRoomEventStart(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
+        DungeonSession.noteCutscene(getClientLevelScope(client), roomId, 'room', false);
+        DungeonSession.noteDialog(getClientLevelScope(client), roomId, 'room_dialog', false);
         br.readMethod15();
         LevelHandler.logEastWingState('eastwing-room-entry', client, roomId);
         const sharedCutsceneDecision = LevelHandler.beginSharedDungeonCutscene(client, roomId);
@@ -5375,7 +5407,7 @@ export class LevelHandler {
     static handleRoomInfoUpdate(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         br.readMethod9();
         br.readMethod26();
         br.readMethod9();
@@ -5393,11 +5425,13 @@ export class LevelHandler {
     static handleRoomClose(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         if (LevelHandler.holdEastWingIntroCloseBarrier(client, roomId, data)) {
             return;
         }
         const sharedCutsceneDecision = LevelHandler.finishSharedDungeonCutscene(client, roomId);
+        DungeonSession.noteCutscene(getClientLevelScope(client), roomId, 'room', true);
+        DungeonSession.noteDialog(getClientLevelScope(client), roomId, 'room_dialog', true);
         if (sharedCutsceneDecision !== 'not_shared') {
             LevelHandler.logDungeonCutsceneSync('room-close-decision', client, {
                 roomId,
@@ -5433,7 +5467,7 @@ export class LevelHandler {
     static handleRoomUnlock(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
 
         LevelHandler.relayToLevel(client, 0xAD, data);
     }
@@ -5441,7 +5475,7 @@ export class LevelHandler {
     static handleRoomBossInfo(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
-        LevelHandler.cacheRoomId(client, roomId);
+        if (LevelHandler.cacheRoomId(client, roomId) !== roomId) return;
         const bossId = br.readMethod9();
         const bossName = br.readMethod26();
         br.readMethod9();
@@ -5748,6 +5782,7 @@ export class LevelHandler {
             newToken,
             activeCharacter,
             client.userId,
+            client.account,
             targetLevel,
             effectivePreviousLevel,
             newX,

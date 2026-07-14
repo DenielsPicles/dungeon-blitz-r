@@ -20,7 +20,6 @@ import {
 const GOBLIN_RIVER_INITIAL_PROGRESS = 11;
 const SHARED_DUNGEON_PROGRESS_EXCLUDED_LEVELS = new Set<string>([
     'TutorialBoat',
-    'TutorialDungeon',
     'TutorialDungeonHard'
 ]);
 const SERVER_AUTHORITY_HOSTILE_PROGRESS_LEVELS = new Set<string>([
@@ -28,7 +27,8 @@ const SERVER_AUTHORITY_HOSTILE_PROGRESS_LEVELS = new Set<string>([
     'Castle',
     'CastleHard',
     'JC_Mini2',
-    'JC_Mini2Hard'
+    'JC_Mini2Hard',
+    'TutorialDungeon'
 ]);
 const EAST_WING_LEVELS = new Set<string>([
     'JC_Mini2',

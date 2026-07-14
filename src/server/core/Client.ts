@@ -193,6 +193,7 @@ export class Client {
     public pendingMissionTurnIns: Set<number> = new Set();
     public authoritativeMaxHp: number = 100;
     public authoritativeCurrentHp: number = 100;
+    public pendingAuthoritativePlayerDamageReports: Array<{ amount: number; recordedAt: number }> = [];
     public combatStatsDirty: boolean = false;
     public allowDirtyCombatStatsRegen: boolean = false;
     public lastCombatStatsRefreshRequestAt: number = 0;
@@ -450,6 +451,7 @@ export class Client {
         this.pendingMissionTurnIns.clear();
         this.authoritativeMaxHp = 100;
         this.authoritativeCurrentHp = 100;
+        this.pendingAuthoritativePlayerDamageReports = [];
         this.combatStatsDirty = false;
         this.allowDirtyCombatStatsRegen = false;
         this.lastCombatStatsRefreshRequestAt = 0;
@@ -574,6 +576,8 @@ export class Client {
                 ? this.craftTownHostCharacter ?? undefined
                 : undefined,
             userId: snapshot.userId,
+            account: this.account ?? undefined,
+            accountEmail: this.account?.email,
             targetLevel: currentLevel,
             levelInstanceId: this.levelInstanceId,
             previousLevel,

@@ -25,6 +25,7 @@ import { GameData } from '../core/GameData';
 import { CharacterSync } from '../utils/CharacterSync';
 import { sendConsumableUpdate } from '../utils/ConsumableState';
 import { LevelConfig } from '../core/LevelConfig';
+import { DungeonSession } from '../core/DungeonSession';
 import { getRoomBossAwareRoomId, isRoomBossEntity } from '../core/RoomBossState';
 import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import { RewardHandler } from './RewardHandler';
@@ -886,6 +887,41 @@ export class CombatHandler {
         return bb.toBuffer();
     }
 
+    private static rememberAuthoritativePlayerDamage(targetSession: Client, amount: number): void {
+        const damage = Math.max(0, Math.round(Number(amount) || 0));
+        if (damage <= 0) {
+            return;
+        }
+
+        const nowMs = Date.now();
+        targetSession.pendingAuthoritativePlayerDamageReports = (
+            targetSession.pendingAuthoritativePlayerDamageReports ?? []
+        )
+            .filter((entry) => nowMs - Math.max(0, Number(entry.recordedAt ?? 0)) <= 2500)
+            .concat({ amount: damage, recordedAt: nowMs })
+            .slice(-8);
+    }
+
+    private static consumeAuthoritativePlayerDamageReport(client: Client, amount: number): boolean {
+        const damage = Math.max(0, Math.round(Math.abs(Number(amount) || 0)));
+        if (damage <= 0) {
+            return false;
+        }
+
+        const nowMs = Date.now();
+        const pending = (client.pendingAuthoritativePlayerDamageReports ?? [])
+            .filter((entry) => nowMs - Math.max(0, Number(entry.recordedAt ?? 0)) <= 2500);
+        const matchIndex = pending.findIndex((entry) => Math.max(0, Math.round(Number(entry.amount ?? 0))) === damage);
+        if (matchIndex < 0) {
+            client.pendingAuthoritativePlayerDamageReports = pending;
+            return false;
+        }
+
+        pending.splice(matchIndex, 1);
+        client.pendingAuthoritativePlayerDamageReports = pending;
+        return true;
+    }
+
     private static buildEntityStatePayloadFromParts(
         entityId: number,
         x: number,
@@ -1050,7 +1086,7 @@ export class CombatHandler {
     }
 
     private static hasLivingPlayerInHostileRoom(levelScope: string, entity: any): boolean {
-        const sourceRoomId = Number.isFinite(Number(entity?.roomId)) ? Math.round(Number(entity.roomId)) : -1;
+        const sourceRoomId = getRoomBossAwareRoomId(entity);
         for (const session of GlobalState.sessionsByToken.values()) {
             if (!session.playerSpawned || getClientLevelScope(session) !== levelScope) {
                 continue;
@@ -3149,13 +3185,7 @@ export class CombatHandler {
             return false;
         }
 
-        const sourceRoomId = Number.isFinite(Number(sourceEntity?.roomId))
-            ? Math.round(Number(sourceEntity.roomId))
-            : (
-                Number.isFinite(Number(client.currentRoomId))
-                    ? Math.round(Number(client.currentRoomId))
-                    : -1
-            );
+        const sourceRoomId = getRoomBossAwareRoomId(sourceEntity, client.currentRoomId);
         const locked = LevelHandler.isDungeonCutsceneCombatLockedForScope(levelScope, sourceRoomId);
         if (!locked) {
             return false;
@@ -5292,7 +5322,7 @@ export class CombatHandler {
             return;
         }
 
-        const sourceRoomId = Number.isFinite(Number(sourceEntity?.roomId)) ? Number(sourceEntity.roomId) : -1;
+        const sourceRoomId = getRoomBossAwareRoomId(sourceEntity);
         const partySharedSource = CombatHandler.shouldMirrorClientSpawnEntityToParty(getScopeLevelName(levelScope), sourceEntity);
         const dedupedRefs = Array.from(new Set(referencedEntityIds.filter((id) => Number.isFinite(id) && id > 0)));
 
@@ -5426,6 +5456,33 @@ export class CombatHandler {
         CombatHandler.broadcastToCombatRoom(targetSession, 0x07, payload, false, [targetSession.clientEntID]);
     }
 
+    private static sendAuthoritativePlayerActiveState(targetSession: Client, roomScoped: boolean = false): void {
+        if (!targetSession.playerSpawned || !targetSession.currentLevel || targetSession.clientEntID <= 0) {
+            return;
+        }
+
+        const levelScope = getClientLevelScope(targetSession);
+        const entity = targetSession.entities.get(targetSession.clientEntID) ??
+            CombatHandler.resolveLevelEntity(levelScope, targetSession.clientEntID);
+        const facingLeft = Boolean(entity?.facingLeft);
+        const payload = CombatHandler.buildEntityStatePayload(targetSession.clientEntID, EntityState.ACTIVE, facingLeft);
+        targetSession.send(0x07, payload);
+
+        for (const other of GlobalState.sessionsByToken.values()) {
+            if (
+                other === targetSession ||
+                !other.playerSpawned ||
+                getClientLevelScope(other) !== levelScope ||
+                (roomScoped && !sharesRoomIds(other.currentRoomId, targetSession.currentRoomId)) ||
+                !CombatHandler.canViewerResolveAnchoredCombatEntity(other, targetSession, levelScope, targetSession.clientEntID)
+            ) {
+                continue;
+            }
+
+            CombatHandler.sendTranslatedPacket(other, 0x07, payload);
+        }
+    }
+
     private static getEntityPosition(entity: any): CombatPoint | null {
         if (!entity || typeof entity !== 'object') {
             return null;
@@ -5468,7 +5525,7 @@ export class CombatHandler {
             return false;
         }
 
-        const bossRoomId = Number.isFinite(Number(entity?.roomId)) ? Math.round(Number(entity.roomId)) : -1;
+        const bossRoomId = getRoomBossAwareRoomId(entity);
         const playerRoomId = Number.isFinite(Number(session.currentRoomId)) ? Math.round(Number(session.currentRoomId)) : -1;
         if (bossRoomId < 0 || playerRoomId < 0 || bossRoomId !== playerRoomId) {
             return false;
@@ -6744,6 +6801,14 @@ export class CombatHandler {
         }
 
         const sourceSession = CombatHandler.resolveCombatSourceSession(levelScope, sourceId, client);
+        const roomActor = isHostileNpcSource ? client : sourceSession;
+        const roomEntity = isHostileNpcSource ? sourceEntity : targetEntity;
+        if (roomActor && roomEntity && !DungeonSession.canPlayerInteractWithEntity(roomActor, roomEntity)) {
+            console.warn(
+                `[DungeonSession][enemy:damaged] sessionId=${String(roomActor.levelInstanceId || levelScope)} roomId=${Math.round(Number(roomActor.currentRoomId ?? -1))} entityId=${Math.round(Number(roomEntity.id ?? 0))} result=rejected_room_mismatch entityRoomId=${Math.round(Number(roomEntity.roomId ?? -1))}`
+            );
+            return;
+        }
         if (CombatHandler.shouldSuppressForeignOwnedHit(client, sourceSession, isHostileNpcSource)) {
             return;
         }
@@ -6790,6 +6855,7 @@ export class CombatHandler {
         } | null = null;
         let partySharedHostileDeathRelay: { entityId: number; entity: any; anchor: Client } | null = null;
         let serverAuthorityNpcSnapshots = new Map<number, HostileViewerHealthSnapshot>();
+        let playerHitResolution: { appliedDamage: number; killed: boolean } | null = null;
         const targetSession = CombatHandler.findPlayerSessionByEntityId(targetId);
         if (targetSession && areClientsInSameLevelScope(client, targetSession)) {
             if (
@@ -6812,10 +6878,14 @@ export class CombatHandler {
                 return;
             }
             const resolution = CombatHandler.updatePlayerTargetAfterHit(targetSession, damage);
+            playerHitResolution = resolution;
             relayDamage = resolution.appliedDamage;
 
             if (resolution.appliedDamage > 0 && !isHostileNpcSource) {
                 CombatHandler.broadcastPlayerHpDelta(targetSession, -resolution.appliedDamage);
+            }
+            if (resolution.appliedDamage > 0 && isHostileNpcSource) {
+                CombatHandler.rememberAuthoritativePlayerDamage(targetSession, resolution.appliedDamage);
             }
 
             if (resolution.killed) {
@@ -6886,6 +6956,11 @@ export class CombatHandler {
             );
             const resolution = CombatHandler.updateNpcTargetAfterHit(levelScope, targetId, damage, sourceId, deathContext);
             if (resolution.entity && Math.max(0, Math.round(Number(resolution.appliedDamage ?? 0))) > 0) {
+                DungeonSession.noteEntityState(
+                    levelScope,
+                    resolution.entity,
+                    resolution.killed ? 'enemy:died' : (Boolean(resolution.entity?.boss ?? resolution.entity?.roomBoss ?? resolution.entity?.isRoomBoss) ? 'boss:stateUpdated' : 'enemy:damaged')
+                );
                 CombatHandler.logHpMutation(
                     'powerhit',
                     sourceSession ?? client,
@@ -7056,6 +7131,9 @@ export class CombatHandler {
         if (isHostileNpcSource) {
             const excludeLocalVictim = targetSession === client ? client : null;
             CombatHandler.broadcastEntityViewPacket(levelScope, sourceEntity, 0x0A, relayPayload, [targetId, sourceId], excludeLocalVictim);
+            if (targetSession && playerHitResolution && playerHitResolution.appliedDamage > 0 && !playerHitResolution.killed) {
+                CombatHandler.sendAuthoritativePlayerActiveState(targetSession, true);
+            }
             consumePartySharedHostileDeathRelay();
             return;
         }
@@ -7771,6 +7849,17 @@ export class CombatHandler {
                 entityId,
                 amount,
                 entityHp: Math.round(Number(entity?.hp ?? 0)),
+                authHp: Math.round(Number(client.authoritativeCurrentHp ?? 0)),
+                authMax: Math.round(Number(client.authoritativeMaxHp ?? 0))
+            }, CombatHandler.PLAYER_HP_LOG_THROTTLE_MS);
+            return;
+        }
+
+        if (amount < 0 && CombatHandler.consumeAuthoritativePlayerDamageReport(client, amount)) {
+            CombatHandler.logPlayerHp('client-hp-authoritative-confirmed', client, {
+                rawEntityId,
+                entityId,
+                amount,
                 authHp: Math.round(Number(client.authoritativeCurrentHp ?? 0)),
                 authMax: Math.round(Number(client.authoritativeMaxHp ?? 0))
             }, CombatHandler.PLAYER_HP_LOG_THROTTLE_MS);
