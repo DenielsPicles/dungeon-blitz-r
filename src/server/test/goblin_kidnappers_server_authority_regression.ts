@@ -244,6 +244,16 @@ async function testAnnaChainCompletesAfterBoss(): Promise<void> {
     await MissionHandler.handleForcedDungeonObjectiveCompletion(client as never, annaChainEntity());
 
     assert.equal(client.pendingDungeonCompletionScope, '', 'completion must wait in the shared state, not a client timer');
+    DungeonCompletionSystem.noteClientCompletionSignal(
+        scope,
+        DungeonCompletionSystem.getParticipantKey(client as never),
+        100
+    );
+    const beforeCutsceneEnd = DungeonCompletionSystem.evaluate(scope);
+    assert.equal(beforeCutsceneEnd.ready, false, 'client completion signal must not bypass the active end cutscene');
+    assert.equal(beforeCutsceneEnd.reason, 'cutscene_gate_pending');
+    assert.equal(packetCount(client, 0x87), 0, 'rank result must remain hidden until the end cutscene finishes');
+
     MissionHandler.noteDungeonCutsceneEnd(client as never, 11);
     await sleep(5);
 

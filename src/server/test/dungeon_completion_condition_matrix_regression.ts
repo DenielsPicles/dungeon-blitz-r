@@ -174,32 +174,25 @@ function satisfyCondition(scenario: Scenario, participantKey: string, baseTime: 
             false,
             `${levelName}: ignored its cutscene gate`
         );
-        DungeonCompletionSystem.noteCutsceneStart(levelScope, 7, gateBaseTime + 11);
-        assert.strictEqual(
-            DungeonCompletionSystem.noteCutsceneEnd(levelScope, 8, gateBaseTime + 12),
-            false,
-            `${levelName}: accepted the wrong cutscene room`
-        );
-        DungeonCompletionSystem.noteClientCompletionSignal(levelScope, participantKey, 100, gateBaseTime + 13);
-        if (condition.cutscene.release === 'shared-end') {
-            assert.strictEqual(
-                DungeonCompletionSystem.evaluate(levelScope, gateBaseTime + 14).ready,
-                false,
-                `${levelName}: client signal bypassed an authoritative cutscene-end gate`
-            );
-            assert.strictEqual(
-                DungeonCompletionSystem.noteCutsceneEnd(levelScope, 7, gateBaseTime + 15),
-                true,
-                `${levelName}: did not release after the authoritative cutscene ended`
-            );
-        } else {
-            assert.strictEqual(
-                DungeonCompletionSystem.evaluate(levelScope, gateBaseTime + 14).ready,
-                true,
-                `${levelName}: client completion did not release its fallback cutscene gate`
-            );
-        }
     }
+
+    DungeonCompletionSystem.noteCutsceneStart(levelScope, 7, gateBaseTime + 11);
+    assert.strictEqual(
+        DungeonCompletionSystem.noteCutsceneEnd(levelScope, 8, gateBaseTime + 12),
+        false,
+        `${levelName}: accepted the wrong cutscene room`
+    );
+    DungeonCompletionSystem.noteClientCompletionSignal(levelScope, participantKey, 100, gateBaseTime + 13);
+    assert.strictEqual(
+        DungeonCompletionSystem.evaluate(levelScope, gateBaseTime + 14).ready,
+        false,
+        `${levelName}: client signal bypassed an active authoritative cutscene`
+    );
+    assert.strictEqual(
+        DungeonCompletionSystem.noteCutsceneEnd(levelScope, 7, gateBaseTime + 15),
+        true,
+        `${levelName}: did not release after the authoritative cutscene ended`
+    );
 
     assert.strictEqual(
         DungeonCompletionSystem.evaluate(levelScope, gateBaseTime + 20).ready,

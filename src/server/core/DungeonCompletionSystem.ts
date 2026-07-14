@@ -243,15 +243,14 @@ export class DungeonCompletionSystem {
             return { ready: false, phase: state.phase, reason: 'client_completion_signal_pending', objectivesMet: true, gateMet: false };
         }
 
-        let gateMet = true;
+        const activeSharedCutscene = state.cutsceneStartedAt > 0 &&
+            state.cutsceneEndedSequence < state.cutsceneStartedSequence;
+        let gateMet = !activeSharedCutscene;
         if (condition.cutscene?.requiredAfterObjectives) {
             const sharedCutsceneEnded = state.cutsceneStartedAt > 0 &&
                 state.cutsceneEndedSequence >= state.cutsceneStartedSequence &&
                 state.cutsceneEndedSequence > state.objectivesMetSequence;
-            const clientSignalReleasesGate =
-                condition.cutscene.release === 'shared-end-or-client-signal' &&
-                hasClientSignalAfterObjectives;
-            gateMet = sharedCutsceneEnded || clientSignalReleasesGate;
+            gateMet = sharedCutsceneEnded;
         }
         if (!gateMet) {
             if (!finalizationPhase) {

@@ -8,7 +8,6 @@ export type DungeonCompletionEntityObjective = {
 
 export type DungeonCompletionCutsceneCondition = {
     requiredAfterObjectives: boolean;
-    release: 'shared-end' | 'shared-end-or-client-signal';
 };
 
 export type DungeonCompletionCondition = {

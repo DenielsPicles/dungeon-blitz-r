@@ -13,7 +13,6 @@ type RawCatalog = {
 
 const catalog = rawConditions as RawCatalog;
 const VALID_MODES = new Set<DungeonCompletionMode>(['bosses', 'full-clear', 'client-signal', 'disabled']);
-const VALID_CUTSCENE_RELEASES = new Set(['shared-end', 'shared-end-or-client-signal']);
 
 function normalizeIdentity(value: unknown): string {
     return String(value ?? '')
@@ -62,7 +61,7 @@ function cloneCondition(condition: DungeonCompletionCondition): DungeonCompletio
 }
 
 export class DungeonCompletionConditions {
-    static readonly SCHEMA_VERSION = 1;
+    static readonly SCHEMA_VERSION = 2;
 
     static get(levelName: string | null | undefined): DungeonCompletionCondition | null {
         const normalized = LevelConfig.normalizeLevelName(levelName) || String(levelName ?? '').trim();
@@ -198,10 +197,7 @@ export class DungeonCompletionConditions {
             }
             if (
                 condition.cutscene &&
-                (
-                    !condition.cutscene.requiredAfterObjectives ||
-                    !VALID_CUTSCENE_RELEASES.has(condition.cutscene.release)
-                )
+                !condition.cutscene.requiredAfterObjectives
             ) {
                 errors.push(`${levelName}: invalid cutscene completion gate`);
             }
