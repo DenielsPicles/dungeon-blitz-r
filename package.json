@@ -1,6 +1,6 @@
 {
     "name": "dungeon-blitz-r",
-    "version": "1.10.4",
+    "version": "1.10.5",
     "description": "Dungeon Blitz: R",
     "main": "index.js",
     "scripts": {
@@ -18,6 +18,9 @@
         "dev:with-discord": "concurrently -n GAME,RPC -c blue,magenta \"npm run dev\" \"npm run dev:discord-bridge\"",
         "reset-password": "cd src/server && npm run reset-password --",
         "migrate:game-data-to-mongo": "cd src/server && npm run migrate:game-data-to-mongo --",
+        "pm2:setup:google-cloud": "bash scripts/setup-google-cloud-pm2.sh",
+        "pm2:start": "pm2 startOrReload ecosystem.config.cjs --env production",
+        "pm2:logs": "pm2 logs dungeon-blitz-multiplayer",
         "export:goblin-kidnappers-spawns": "node src/server/tools/exportGoblinKidnappersEnemies.js",
         "test:goblin-kidnappers-authority": "cd src/server && ts-node --transpile-only test/goblin_kidnappers_server_authority_regression.ts"
     },

@@ -25,6 +25,40 @@ The launcher is configured to open this address. Discord and MongoDB secrets
 belong only in the VM's untracked `src/server/.env`; never copy them into the
 launcher or commit them.
 
+### PM2 startup and automatic multiplayer updates
+
+On the Google Cloud VM, run the one-time setup as the normal SSH user (do not
+prefix the command with `sudo`):
+
+```sh
+cd ~/dungeon-blitz-r
+git fetch origin multiplayer
+git switch multiplayer
+git pull --ff-only origin multiplayer
+npm run pm2:setup:google-cloud
+```
+
+The setup installs PM2, creates a systemd startup service for the current user,
+starts the `dungeon-blitz-multiplayer` process, and saves the PM2 process list.
+At every VM boot or PM2 restart, `scripts/start-multiplayer-pm2.sh` preserves
+local tracked/untracked runtime changes, fast-forwards from
+`origin/multiplayer`, restores the local changes, refreshes server dependencies
+when `src/server/package-lock.json` changes, and starts the multiplayer server.
+Ignored files such as `src/server/.env` and `data/saves/` are never included in
+the temporary Git stash.
+
+Useful commands:
+
+```sh
+pm2 status
+pm2 logs dungeon-blitz-multiplayer
+pm2 restart dungeon-blitz-multiplayer
+pm2 save
+```
+
+Use `pm2 restart dungeon-blitz-multiplayer` after pushing a new multiplayer
+version when you want the VM to fetch it immediately without rebooting.
+
 ### Prerequisites
 
 Warning: Run everything here within a tmux session if you'd like it to continue running once you log out of ssh
