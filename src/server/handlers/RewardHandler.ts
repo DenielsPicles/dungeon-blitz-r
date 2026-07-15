@@ -16,6 +16,8 @@ import { normalizeCharacterMaterials } from '../utils/MaterialInventory';
 import { PetHandler } from './PetHandler';
 import { Config } from '../core/config';
 import { EntityHandler } from './EntityHandler';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
+import { DungeonCompletionSystem } from '../core/DungeonCompletionSystem';
 
 interface RewardRequest {
     receiverId: number;
@@ -576,6 +578,32 @@ export class RewardHandler {
         return reason === 'canonical_hostile_death' || reason === 'legacy_enemy_reward';
     }
 
+    private static requiresCanonicalHostileLootContext(
+        levelName: string | null | undefined,
+        sourceEntity: any = null,
+        sourceEnemyCanonicalId: number = 0
+    ): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (!EntityHandler.usesServerAuthorityHostiles(normalizedLevel)) {
+            return false;
+        }
+        if (normalizedLevel !== 'TutorialDungeon') {
+            return true;
+        }
+
+        const canonicalId = Math.max(
+            0,
+            Math.round(Number(
+                sourceEnemyCanonicalId ||
+                sourceEntity?.canonicalEntityId ||
+                sourceEntity?.sharedCanonicalId ||
+                (!sourceEntity?.clientSpawned ? sourceEntity?.id : 0) ||
+                0
+            ))
+        );
+        return canonicalId === TutorialDungeonMechanics.TAG_UGO_BOSS_ID;
+    }
+
     private static isCanonicalDeathLootContextValid(
         levelScope: string,
         sourceEnemyCanonicalId: number,
@@ -653,9 +681,12 @@ export class RewardHandler {
             collected: false,
             collectedBy: 0
         };
-        const isServerAuthorityHostileLevel = EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope));
         if (
-            isServerAuthorityHostileLevel &&
+            RewardHandler.requiresCanonicalHostileLootContext(
+                getScopeLevelName(levelScope),
+                null,
+                metadata.sourceEnemyCanonicalId
+            ) &&
             RewardHandler.isEnemyLootReason(reason) &&
             !RewardHandler.isCanonicalDeathLootContextValid(levelScope, metadata.sourceEnemyCanonicalId, metadata.sourceEnemyLootDropNonce)
         ) {
@@ -1025,6 +1056,67 @@ export class RewardHandler {
         return true;
     }
 
+    private static handleAuthoritativeTutorialChestReward(
+        client: Client,
+        reward: RewardRequest,
+        sourceEntity: any,
+        dropPosition: { x: number; y: number }
+    ): boolean {
+        if (!TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            return false;
+        }
+        const authority = TutorialDungeonMechanics.getAuthorityEntity(
+            sourceEntity ?? { id: reward.sourceId },
+            Number(client.currentRoomId ?? 0)
+        );
+        if (!authority || (authority.role !== 'tutorial_chest' && authority.role !== 'boss_chest')) {
+            return false;
+        }
+
+        const levelScope = getClientLevelScope(client);
+        if (!TutorialDungeonMechanics.isWorldObjectResolved(levelScope, authority.stableId)) {
+            const transition = TutorialDungeonMechanics.commitClientObjectDefeat(client, sourceEntity);
+            if (!transition.accepted) {
+                return true;
+            }
+            EntityHandler.broadcastTutorialDungeonObjectTransition(client, authority);
+        }
+
+        const recipients = Array.from(GlobalState.sessionsByToken.values()).filter((recipient) =>
+            recipient.playerSpawned &&
+            Boolean(recipient.character) &&
+            getClientLevelScope(recipient) === levelScope
+        );
+        for (const recipient of recipients) {
+            const participantKey = DungeonCompletionSystem.getParticipantKey(recipient);
+            const claim = TutorialDungeonMechanics.claimChestReward(
+                levelScope,
+                authority.stableId,
+                participantKey,
+                client.token
+            );
+            if (!claim.accepted) {
+                continue;
+            }
+            RewardHandler.applyRewardToRecipient(
+                recipient,
+                { ...reward, sourceId: authority.id },
+                `${authority.stableId}:${claim.openVersion}:${participantKey}`,
+                sourceEntity ?? {
+                    id: authority.id,
+                    name: authority.name,
+                    x: authority.x,
+                    y: authority.y,
+                    roomId: authority.roomId,
+                    tutorialDungeonStableId: authority.stableId
+                },
+                dropPosition,
+                { reason: 'chest_reward', caller: 'authoritative_tutorial_chest' }
+            );
+        }
+        return true;
+    }
+
     static handleGrantReward(client: Client, data: Buffer): void {
         const br = new BitReader(data);
         const reward: RewardRequest = {
@@ -1051,12 +1143,15 @@ export class RewardHandler {
 
         const sourceEntity = RewardHandler.resolveSourceEntity(client, reward.sourceId);
         const dropPosition = RewardHandler.resolveDropPosition(client, sourceEntity, reward.worldX, reward.worldY);
+        if (RewardHandler.handleAuthoritativeTutorialChestReward(client, reward, sourceEntity, dropPosition)) {
+            return;
+        }
         const { rewardNonce, recipients } = RewardHandler.resolveEligibleRecipients(client, reward.sourceId);
         const reason = RewardHandler.getRewardSourceReason(sourceEntity);
         const caller = 'handleGrantReward';
         const levelScope = getClientLevelScope(client);
         if (
-            EntityHandler.usesServerAuthorityHostiles(client.currentLevel) &&
+            RewardHandler.requiresCanonicalHostileLootContext(client.currentLevel, sourceEntity) &&
             reason === 'legacy_enemy_reward'
         ) {
             return;
@@ -1122,7 +1217,11 @@ export class RewardHandler {
         const sourceLootDropNonce = String(options.lootDropNonce ?? '');
         const caller = String(options.caller ?? 'grantServerEnemyRewardToEligibleViewers');
         if (
-            EntityHandler.usesServerAuthorityHostiles(getScopeLevelName(levelScope)) &&
+            RewardHandler.requiresCanonicalHostileLootContext(
+                getScopeLevelName(levelScope),
+                sourceEntity,
+                sourceEnemyCanonicalId
+            ) &&
             (
                 sourceEnemyCanonicalId !== sourceId ||
                 !RewardHandler.isCanonicalDeathLootContextValid(levelScope, sourceEnemyCanonicalId, sourceLootDropNonce)
