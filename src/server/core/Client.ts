@@ -225,6 +225,8 @@ export class Client {
     public lastDungeonCutsceneStartAt: number = 0;
     public lastDungeonCutsceneEndScope: string = "";
     public lastDungeonCutsceneEndAt: number = 0;
+    public lastEmoteName: string = "";
+    public lastEmoteAt: number = 0;
 
     constructor(socket: net.Socket, router: PacketRouter) {
         this.socket = socket;
@@ -418,6 +420,8 @@ export class Client {
         this.currentRoomId = -1;
         this.lastDoorId = -1;
         this.lastDoorTargetLevel = "";
+        this.lastEmoteName = "";
+        this.lastEmoteAt = 0;
         this.playerSpawned = false;
         this.playSessionStartedAt = Date.now();
         this.partyMapX = 0;

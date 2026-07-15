@@ -4424,6 +4424,7 @@ export class CombatHandler {
                 sourceEnemyCanonicalId: canonicalId,
                 caller: 'canonical_hostile_death'
             });
+            TutorialDungeonMechanics.noteRewardsGranted(client, canonicalEntity);
         }
 
         if (MissionHandler.isRequiredDungeonCompletionBossForLevel(levelName, canonicalEntity)) {

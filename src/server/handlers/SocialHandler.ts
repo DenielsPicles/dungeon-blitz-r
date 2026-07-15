@@ -2074,8 +2074,12 @@ export class SocialHandler {
 
     static handleEmoteBegin(client: Client, data: Buffer): void {
         const br = new BitReader(data);
-        br.readMethod4();
-        br.readMethod13();
+        const entityId = br.readMethod4();
+        const emoteName = br.readMethod13();
+        if (entityId === client.clientEntID) {
+            client.lastEmoteName = emoteName;
+            client.lastEmoteAt = Date.now();
+        }
 
         if (LevelHandler.relaySharedDungeonCutscenePresentationPacket(client, 0x7e, data)) {
             return;

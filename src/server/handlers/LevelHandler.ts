@@ -1145,6 +1145,15 @@ export class LevelHandler {
     }
 
     static syncSharedDungeonQuestProgressState(client: Client): void {
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel) && client.character) {
+            const tutorialState = TutorialDungeonMechanics.getClientState(client);
+            if (tutorialState) {
+                client.character.questTrackerState = tutorialState.progress;
+                client.send(0xB7, LevelHandler.buildQuestProgressPayload(tutorialState.progress));
+                TutorialDungeonMechanics.sendSnapshot(client, 'post_entity_bootstrap');
+            }
+            return;
+        }
         if (!client.currentLevel || !client.character || !usesSharedDungeonProgress(client.currentLevel)) {
             return;
         }
@@ -1187,7 +1196,8 @@ export class LevelHandler {
         if (normalizedLevel === 'TutorialDungeon' || normalizedLevel === 'TutorialDungeonHard') {
             client.currentRoomId = 0;
             client.startedRoomEvents.clear();
-            client.character.questTrackerState = LevelHandler.TUTORIAL_DUNGEON_INITIAL_PROGRESS;
+            client.character.questTrackerState = TutorialDungeonMechanics.getClientState(client)?.progress ??
+                LevelHandler.TUTORIAL_DUNGEON_INITIAL_PROGRESS;
             return;
         }
 
@@ -2801,8 +2811,25 @@ export class LevelHandler {
             if (previousRoomId >= 0 && previousRoomId !== roomId) {
                 PetHandler.armMountTravelProtection(client, 4000, true);
             }
+            if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel) && previousRoomId !== roomId) {
+                const roomResult = TutorialDungeonMechanics.noteRoomStarted(client, roomId);
+                if (roomResult.status !== 'applied') {
+                    TutorialDungeonMechanics.sendSnapshot(client, 'room_change');
+                }
+            }
             LevelHandler.maybeStartTutorialDungeonTraversalTutorial(client, roomId);
         }
+    }
+
+    private static getTutorialDungeonCutsceneKey(roomId: number): string {
+        const normalizedRoomId = Math.max(0, Math.round(Number(roomId) || 0));
+        if (normalizedRoomId === 4) {
+            return 'traversal';
+        }
+        if (normalizedRoomId === 9) {
+            return 'cheer_gate';
+        }
+        return `room:${normalizedRoomId}`;
     }
 
     static isGoblinRiverBossIntroLocked(client: Client): boolean {
@@ -3190,6 +3217,10 @@ export class LevelHandler {
         const levelScope = getClientLevelScope(client);
         if (!levelScope) {
             return false;
+        }
+
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            return true;
         }
 
         return LevelHandler.hasSharedDungeonCutscenePeer(client);
@@ -4527,6 +4558,15 @@ export class LevelHandler {
             client.currentLevel || String(client.character?.CurrentLevel?.name ?? '')
         );
 
+        if (TutorialDungeonMechanics.isTutorialDungeon(currentLevel)) {
+            const canonicalProgress = TutorialDungeonMechanics.noteQuestProgress(client, requestedProgress);
+            if (client.character) {
+                client.character.questTrackerState = canonicalProgress;
+            }
+            client.send(0xB7, LevelHandler.buildQuestProgressPayload(canonicalProgress));
+            return;
+        }
+
         if (currentLevel === 'CraftTown' && previousProgress >= 100 && requestedProgress < 100) {
             progress = previousProgress;
         }
@@ -4591,7 +4631,15 @@ export class LevelHandler {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
         LevelHandler.cacheRoomId(client, roomId);
-        br.readMethod9();
+        const actionStep = br.readMethod9();
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            TutorialDungeonMechanics.advanceCutscene(
+                client,
+                LevelHandler.getTutorialDungeonCutsceneKey(roomId),
+                roomId,
+                actionStep
+            );
+        }
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
             return;
         }
@@ -4606,7 +4654,15 @@ export class LevelHandler {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
         LevelHandler.cacheRoomId(client, roomId);
-        br.readMethod9();
+        const sequenceStep = br.readMethod9();
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            TutorialDungeonMechanics.advanceCutscene(
+                client,
+                LevelHandler.getTutorialDungeonCutsceneKey(roomId),
+                roomId,
+                sequenceStep
+            );
+        }
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
             return;
         }
@@ -4622,6 +4678,14 @@ export class LevelHandler {
         const roomId = br.readMethod9();
         LevelHandler.cacheRoomId(client, roomId);
         br.readMethod15();
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            TutorialDungeonMechanics.startCutscene(
+                client,
+                LevelHandler.getTutorialDungeonCutsceneKey(roomId),
+                roomId,
+                'room_event_start'
+            );
+        }
         const sharedCutsceneDecision = LevelHandler.beginSharedDungeonCutscene(client, roomId);
         if (sharedCutsceneDecision !== 'not_shared') {
         }
@@ -4675,6 +4739,13 @@ export class LevelHandler {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
         LevelHandler.cacheRoomId(client, roomId);
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            const cutsceneKey = LevelHandler.getTutorialDungeonCutsceneKey(roomId);
+            if (cutsceneKey !== 'traversal' && cutsceneKey !== 'cheer_gate') {
+                TutorialDungeonMechanics.completeCutscene(client, cutsceneKey, roomId);
+            }
+            TutorialDungeonMechanics.completeRoom(client, roomId);
+        }
         const sharedCutsceneDecision = LevelHandler.finishSharedDungeonCutscene(client, roomId);
         if (sharedCutsceneDecision !== 'not_shared') {
         }
@@ -4702,6 +4773,14 @@ export class LevelHandler {
         const roomId = br.readMethod9();
         LevelHandler.cacheRoomId(client, roomId);
 
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            const result = TutorialDungeonMechanics.unlockRoom(client, roomId);
+            if (result.status === 'rejected' || result.status === 'requires_resync') {
+                TutorialDungeonMechanics.sendSnapshot(client, 'room_unlock_rejected');
+                return;
+            }
+        }
+
         LevelHandler.relayToLevel(client, 0xAD, data);
     }
 
@@ -4712,6 +4791,13 @@ export class LevelHandler {
         const bossId = br.readMethod9();
         const bossName = br.readMethod26();
         TutorialDungeonMechanics.noteBossIntroStarted(client, bossId, bossName);
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            if (!TutorialDungeonMechanics.getClientState(client)?.boss.encounterStarted) {
+                TutorialDungeonMechanics.sendSnapshot(client, 'boss_intro_rejected');
+                return;
+            }
+            TutorialDungeonMechanics.startCutscene(client, 'boss_intro', roomId, 'room_boss_info');
+        }
         br.readMethod9();
         br.readMethod26();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {

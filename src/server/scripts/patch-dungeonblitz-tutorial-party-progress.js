@@ -4,547 +4,440 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const TARGET_SWFS = [
-    path.join('src', 'client', 'content', 'localhost', 'p', 'cbp', 'DungeonBlitz.swf')
-];
+const DEFAULT_SWF = path.join('src', 'client', 'content', 'localhost', 'p', 'cbp', 'DungeonBlitz.swf');
+const SNAPSHOT_PACKET_ID = 0x115;
 
 function parseArgs(argv) {
-    const args = {
-        ffdec: '',
-        verify: false,
-        swfs: []
-    };
-
-    for (let index = 2; index < argv.length; index++) {
-        const arg = argv[index];
-        if (arg === '--ffdec' || arg === '-f') {
-            args.ffdec = argv[++index] || '';
-            continue;
-        }
-        if (arg === '--swf' || arg === '-s') {
-            args.swfs.push(argv[++index] || '');
-            continue;
-        }
-        if (arg === '--verify') {
-            args.verify = true;
-            continue;
-        }
-        if (arg === '--help' || arg === '-h') {
-            printHelp();
-            process.exit(0);
-        }
-
-        throw new Error(`Unknown argument: ${arg}`);
-    }
-
-    return args;
+  const args = { ffdec: '', swf: DEFAULT_SWF, verify: false };
+  for (let i = 2; i < argv.length; i += 1) {
+    if (argv[i] === '--ffdec' || argv[i] === '-f') args.ffdec = argv[++i] || '';
+    else if (argv[i] === '--swf' || argv[i] === '-s') args.swf = argv[++i] || args.swf;
+    else if (argv[i] === '--verify') args.verify = true;
+    else if (argv[i] === '--help' || argv[i] === '-h') {
+      console.log('Usage: node patch-dungeonblitz-tutorial-party-progress.js [--verify] [--swf <path>] [--ffdec <path>]');
+      process.exit(0);
+    } else throw new Error(`Unknown argument: ${argv[i]}`);
+  }
+  return args;
 }
 
-function printHelp() {
-    console.log(
-        [
-            'Usage:',
-            '  node src/server/scripts/patch-dungeonblitz-tutorial-party-progress.js [--verify] [--swf <path>] [--ffdec <path>]',
-            '',
-            'Defaults:',
-            '  patches the served SWF:',
-            `    ${TARGET_SWFS[0]}`,
-            '  --verify exports the selected SWFs and checks that the tutorial party-progress markers are present'
-        ].join('\n')
-    );
+function repoRoot() { return path.resolve(__dirname, '..', '..', '..'); }
+function resolveFrom(root, value) { return path.isAbsolute(value) ? value : path.join(root, value); }
+
+function detectFfdec(root, preferred) {
+  const candidates = [
+    preferred ? resolveFrom(root, preferred) : '',
+    'C:\\Program Files (x86)\\FFDec\\ffdec-cli.exe',
+    path.join(root, 'build', 'tools', 'ffdec_25.1.3', 'ffdec.jar'),
+    path.join(root, 'build', 'tools', 'ffdec_25.1.3', 'ffdec-cli.jar')
+  ];
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || '';
 }
 
-function resolveRepoRoot() {
-    return path.resolve(__dirname, '..', '..', '..');
-}
-
-function resolvePath(repoRoot, value) {
-    if (!value) {
-        return '';
-    }
-    if (path.isAbsolute(value)) {
-        return value;
-    }
-    return path.join(repoRoot, value);
-}
-
-function detectFfdec(repoRoot, preferred) {
-    const candidates = [];
-    if (preferred) {
-        candidates.push(resolvePath(repoRoot, preferred));
-    }
-
-    candidates.push(
-        path.join(repoRoot, 'build', 'tools', 'ffdec_25.1.3', 'ffdec.jar'),
-        path.join(repoRoot, 'build', 'tools', 'ffdec_25.1.3', 'ffdec.sh'),
-        path.join(repoRoot, 'build', 'tools', 'ffdec_25.1.3', 'ffdec-cli.jar'),
-        path.join(repoRoot, 'temp', 'jpexs_25_1_3', 'FFDec.app', 'Contents', 'Resources', 'ffdec.jar'),
-        path.join(repoRoot, 'temp', 'jpexs_25_1_3', 'FFDec.app', 'Contents', 'Resources', 'ffdec.sh'),
-        path.join(repoRoot, 'temp', 'jpexs_25_1_3', 'FFDec.app', 'Contents', 'Resources', 'ffdec-cli.jar')
-    );
-
-    for (const candidate of candidates) {
-        if (candidate && fs.existsSync(candidate)) {
-            return candidate;
-        }
-    }
-
-    return '';
-}
-
-function runFfdec(ffdecPath, args) {
-    const resolved = path.resolve(ffdecPath);
-    const basename = path.basename(resolved).toLowerCase();
-
-    if (basename.endsWith('.jar')) {
-        execFileSync('java', ['-jar', resolved, '-cli', ...args], {
-            stdio: 'inherit'
-        });
-        return;
-    }
-
-    if (basename.endsWith('.sh')) {
-        execFileSync(resolved, ['-cli', ...args], {
-            stdio: 'inherit'
-        });
-        return;
-    }
-
-    execFileSync(resolved, ['-cli', ...args], {
-        stdio: 'inherit'
-    });
+function runFfdec(ffdec, args) {
+  if (ffdec.toLowerCase().endsWith('.jar')) execFileSync('java', ['-jar', ffdec, '-cli', ...args], { stdio: 'inherit' });
+  else execFileSync(ffdec, ['-cli', ...args], { stdio: 'inherit' });
 }
 
 function replaceExact(source, needle, replacement, label) {
-    if (!source.includes(needle)) {
-        throw new Error(`Could not find patch marker: ${label}`);
+  if (!source.includes(needle)) throw new Error(`Missing patch marker: ${label}`);
+  return source.replace(needle, replacement);
+}
+
+function replaceMethod(source, methodName, replacement) {
+  const marker = `function ${methodName}(`;
+  const markerAt = source.indexOf(marker);
+  if (markerAt < 0) throw new Error(`Missing method ${methodName}`);
+  const methodAt = source.lastIndexOf('      public ', markerAt);
+  const braceAt = source.indexOf('{', markerAt);
+  let depth = 0;
+  for (let i = braceAt; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return `${source.slice(0, methodAt)}${replacement}${source.slice(i + 1)}`;
     }
-    return source.replace(needle, replacement);
+  }
+  throw new Error(`Unterminated method ${methodName}`);
+}
+
+function injectMethodStart(source, methodName, lines) {
+  if (source.includes(lines.trim())) return source;
+  const marker = `function ${methodName}(`;
+  const markerAt = source.indexOf(marker);
+  if (markerAt < 0) throw new Error(`Missing method ${methodName}`);
+  const braceAt = source.indexOf('{', markerAt);
+  return `${source.slice(0, braceAt + 1)}\n${lines}${source.slice(braceAt + 1)}`;
 }
 
 function patchLinkUpdater(source) {
-    const eol = source.includes('\r\n') ? '\r\n' : '\n';
-    const join = (lines) => lines.join(eol);
+  if (!source.includes('import flash.utils.getQualifiedClassName;')) {
+    source = replaceExact(
+      source,
+      '   import flash.geom.Point;',
+      '   import flash.geom.Point;\n   import flash.utils.getQualifiedClassName;',
+      'LinkUpdater import'
+    );
+  }
 
-    if (!source.includes('private function method_1912(param1:Entity) : void')) {
-        source = replaceExact(
-            source,
-            join([
-                '      private function method_1615(param1:Packet) : void'
-            ]),
-            join([
-                '      private function method_1912(param1:Entity) : void',
-                '      {',
-                '         var _loc2_:Room = null;',
-                '         var _loc3_:uint = 0;',
-                '         if(!param1 || !param1.cue || !param1.cue.room)',
-                '         {',
-                '            return;',
-                '         }',
-                '         if(!this.var_1 || !this.var_1.level || this.var_1.level.internalName != "TutorialDungeon")',
-                '         {',
-                '            return;',
-                '         }',
-                '         _loc2_ = param1.cue.room as Room;',
-                '         if(!_loc2_)',
-                '         {',
-                '            return;',
-                '         }',
-                '         param1.var_1609 = _loc2_;',
-                '         param1.currRoom = _loc2_;',
-                '         if(_loc2_.var_229.indexOf(param1) == -1)',
-                '         {',
-                '            _loc2_.var_229.push(param1);',
-                '         }',
-                '         _loc3_ = _loc2_.method_348();',
-                '         if(_loc3_ > _loc2_.var_2261)',
-                '         {',
-                '            _loc2_.var_2261 = _loc3_;',
-                '         }',
-                '         _loc3_ = _loc2_.method_1990();',
-                '         if(_loc3_ > _loc2_.var_802)',
-                '         {',
-                '            _loc2_.var_802 = _loc3_;',
-                '         }',
-                '      }',
-                '      ',
-                '      private function method_1615(param1:Packet) : void'
-            ]),
-            'LinkUpdater tutorial room bookkeeping helper'
-        );
-    }
+  if (!source.includes('GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET')) {
+    source = replaceExact(
+      source,
+      '      private static const DUPLICATE_REMOTE_ENTITY_POSITION_TOLERANCE:uint = 24;',
+      `      private static const DUPLICATE_REMOTE_ENTITY_POSITION_TOLERANCE:uint = 24;
 
-    if (!source.includes('this.method_1912(_loc46_);')) {
-        source = replaceExact(
-            source,
-            join([
-                '         if(_loc46_.cue)',
-                '         {',
-                '            _loc46_.cue.bSpawned = true;',
-                '         }',
-                '         _loc46_.var_38.var_914 = _loc5_;'
-            ]),
-            join([
-                '         if(_loc46_.cue)',
-                '         {',
-                '            _loc46_.cue.bSpawned = true;',
-                '         }',
-                '         if(_loc12_ != Entity.PLAYER)',
-                '         {',
-                '            this.method_1912(_loc46_);',
-                '         }',
-                '         _loc46_.var_38.var_914 = _loc5_;'
-            ]),
-            'LinkUpdater tutorial room bookkeeping call'
-        );
-    }
+      public static const GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET:uint = ${SNAPSHOT_PACKET_ID};
+      public static const GOBLIN_KIDNAPPERS_PROTOCOL:uint = 1;
+      public static var goblinKidnappersSnapshotReady:Boolean = false;
+      public static var goblinKidnappersScope:String = "";
+      public static var goblinKidnappersRevision:int = -1;
+      public static var goblinKidnappersSnapshot:Object = null;
+      private static var goblinKidnappersUpdater:LinkUpdater = null;
+      private static var goblinKidnappersWave80Pending:Boolean = false;
+      private static var goblinKidnappersWave50Pending:Boolean = false;
+      private static var goblinKidnappersWave33Pending:Boolean = false;
 
-    return source;
+      public static function GoblinKidnappersEntityCompleted(param1:uint) : Boolean
+      {
+         var _loc2_:Object = null;
+         if(!goblinKidnappersSnapshotReady || !goblinKidnappersSnapshot)
+         {
+            return false;
+         }
+         if(param1 == 3923550)
+         {
+            return Boolean(goblinKidnappersSnapshot.boss) && Boolean(goblinKidnappersSnapshot.boss.dead);
+         }
+         _loc2_ = goblinKidnappersSnapshot.dummies ? goblinKidnappersSnapshot.dummies[String(param1)] : null;
+         if(_loc2_ && Boolean(_loc2_.completed))
+         {
+            return true;
+         }
+         _loc2_ = goblinKidnappersSnapshot.chains ? goblinKidnappersSnapshot.chains[String(param1)] : null;
+         if(_loc2_ && Boolean(_loc2_.broken))
+         {
+            return true;
+         }
+         _loc2_ = goblinKidnappersSnapshot.chests ? goblinKidnappersSnapshot.chests[String(param1)] : null;
+         return Boolean(_loc2_) && Boolean(_loc2_.opened);
+      }
+
+      public static function GoblinKidnappersObjectiveCompleted(param1:String) : Boolean
+      {
+         var _loc2_:String = null;
+         if(!goblinKidnappersSnapshotReady || !goblinKidnappersSnapshot || !goblinKidnappersSnapshot.completedObjectives)
+         {
+            return false;
+         }
+         for each(_loc2_ in goblinKidnappersSnapshot.completedObjectives)
+         {
+            if(_loc2_ == param1)
+            {
+               return true;
+            }
+         }
+         return false;
+      }
+
+      public static function GoblinKidnappersRoomCompleted(param1:Object) : Boolean
+      {
+         var _loc2_:String = getQualifiedClassName(param1);
+         var _loc3_:int = GoblinKidnappersRoomId(_loc2_);
+         var _loc4_:Object = null;
+         if(_loc3_ <= 0 || !goblinKidnappersSnapshotReady || !goblinKidnappersSnapshot || !goblinKidnappersSnapshot.completedRooms)
+         {
+            return false;
+         }
+         for each(_loc4_ in goblinKidnappersSnapshot.completedRooms)
+         {
+            if(int(_loc4_) == _loc3_)
+            {
+               return true;
+            }
+         }
+         return false;
+      }
+
+      private static function GoblinKidnappersRoomId(param1:String) : int
+      {
+         if(param1.indexOf("a_Room_Tutorial_01") >= 0) return 1;
+         if(param1.indexOf("a_Room_Tutorial_02") >= 0) return 2;
+         if(param1.indexOf("a_Room_Tutorial_04") >= 0) return 4;
+         if(param1.indexOf("a_Room_Tutorial_05_ALT") >= 0) return 5;
+         if(param1.indexOf("a_Room_NRIMR05_ALT") >= 0) return 6;
+         if(param1.indexOf("a_Room_NRIMR06") >= 0) return 8;
+         if(param1.indexOf("a_Room_NRIMR03") >= 0) return 9;
+         if(param1.indexOf("a_Room_NRM02RGoblinCaveBoss") >= 0) return 11;
+         return 0;
+      }
+
+      private static function GoblinKidnappersCueRecord(param1:a_Cue, param2:Object) : Object
+      {
+         var _loc3_:String = getQualifiedClassName(param2);
+         var _loc4_:String = param1 ? param1.name : "";
+         var _loc5_:Object = null;
+         var _loc6_:Object = null;
+         if(!goblinKidnappersSnapshotReady || !goblinKidnappersSnapshot || !_loc4_)
+         {
+            return null;
+         }
+         for each(_loc5_ in [goblinKidnappersSnapshot.dummies,goblinKidnappersSnapshot.chains,goblinKidnappersSnapshot.chests])
+         {
+            if(!_loc5_) continue;
+            for each(_loc6_ in _loc5_)
+            {
+               if(_loc3_.indexOf(String(_loc6_.sourceRoom)) >= 0 && _loc4_ == String(_loc6_.sourceVar))
+               {
+                  return _loc6_;
+               }
+            }
+         }
+         if(_loc3_.indexOf("a_Room_NRM02RGoblinCaveBoss") >= 0 && _loc4_ == "am_Boss")
+         {
+            return goblinKidnappersSnapshot.boss;
+         }
+         return null;
+      }
+
+      public static function GoblinKidnappersShouldSuppressCue(param1:a_Cue, param2:Object) : Boolean
+      {
+         var _loc3_:Object = GoblinKidnappersCueRecord(param1,param2);
+         return Boolean(_loc3_) && (Boolean(_loc3_.completed) || Boolean(_loc3_.broken) || Boolean(_loc3_.opened) || Boolean(_loc3_.dead));
+      }
+
+      public static function GoblinKidnappersShouldKeepCollisionOff(param1:Object, param2:String) : Boolean
+      {
+         if(!goblinKidnappersSnapshotReady)
+         {
+            return false;
+         }
+         if(param2 == "am_DynamicCollision_WaitingForHelp" && GoblinKidnappersEntityCompleted(3268190)) return true;
+         if(param2 == "am_DynamicCollision_GateBlock" && GoblinKidnappersEntityCompleted(4972126)) return true;
+         if(param2 == "am_DynamicCollision_PathBlock02" && (GoblinKidnappersEntityCompleted(4709982) || GoblinKidnappersObjectiveCompleted("cutscene:cheer_gate"))) return true;
+         if((param2 == "am_DynamicCollision_TrapWall" || param2 == "am_DynamicCollision_Gate") && GoblinKidnappersRoomCompleted(param1)) return true;
+         return false;
+      }
+
+      public static function GoblinKidnappersConsumeBossWave(param1:Number) : Boolean
+      {
+         if(!goblinKidnappersSnapshotReady) return false;
+         if(param1 == 0.8 && goblinKidnappersWave80Pending) { goblinKidnappersWave80Pending = false; return true; }
+         if(param1 == 0.5 && goblinKidnappersWave50Pending) { goblinKidnappersWave50Pending = false; return true; }
+         if(param1 == 0.33 && goblinKidnappersWave33Pending) { goblinKidnappersWave33Pending = false; return true; }
+         return false;
+      }`,
+      'LinkUpdater snapshot state'
+    );
+  }
+
+  if (!source.includes('public static function GoblinKidnappersRequestObjective(')) {
+    source = replaceExact(
+      source,
+      '      public static function GoblinKidnappersEntityCompleted(param1:uint) : Boolean',
+      `      public static function GoblinKidnappersRequestObjective(param1:String, param2:uint) : void
+      {
+         var _loc3_:Packet = null;
+         if(!goblinKidnappersSnapshotReady || !goblinKidnappersUpdater || !goblinKidnappersUpdater.var_1 || !goblinKidnappersUpdater.var_1.serverConn)
+         {
+            return;
+         }
+         _loc3_ = new Packet(GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET);
+         _loc3_.method_6(2,2);
+         _loc3_.method_4(GOBLIN_KIDNAPPERS_PROTOCOL);
+         _loc3_.method_13(goblinKidnappersScope);
+         _loc3_.method_4(uint(goblinKidnappersRevision));
+         _loc3_.method_13(param1);
+         _loc3_.method_9(param2);
+         goblinKidnappersUpdater.var_1.serverConn.SendPacket(_loc3_);
+      }
+
+      public static function GoblinKidnappersEntityCompleted(param1:uint) : Boolean`,
+      'LinkUpdater objective request'
+    );
+  }
+
+  if (!source.includes('goblinKidnappersSnapshot.parrots]')) {
+    source = replaceExact(
+      source,
+      '[goblinKidnappersSnapshot.dummies,goblinKidnappersSnapshot.chains,goblinKidnappersSnapshot.chests]',
+      '[goblinKidnappersSnapshot.dummies,goblinKidnappersSnapshot.chains,goblinKidnappersSnapshot.chests,goblinKidnappersSnapshot.parrots]',
+      'LinkUpdater parrot cue records'
+    );
+  }
+
+  if (!source.includes('String(_loc3_.state) == "removed"')) {
+    source = replaceExact(
+      source,
+      'return Boolean(_loc3_) && (Boolean(_loc3_.completed) || Boolean(_loc3_.broken) || Boolean(_loc3_.opened) || Boolean(_loc3_.dead));',
+      'return Boolean(_loc3_) && (Boolean(_loc3_.completed) || Boolean(_loc3_.broken) || Boolean(_loc3_.opened) || Boolean(_loc3_.dead) || String(_loc3_.state) == "removed");',
+      'LinkUpdater removed parrot suppression'
+    );
+  }
+
+  if (!source.includes('goblinKidnappersUpdater = this;')) {
+    source = replaceExact(
+      source,
+      '         this.var_1 = param1;\n      }',
+      '         this.var_1 = param1;\n         goblinKidnappersUpdater = this;\n      }',
+      'LinkUpdater constructor'
+    );
+  }
+
+  if (!source.includes('case GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET:')) {
+    source = replaceExact(
+      source,
+      '         switch(param1.type)\n         {\n            case PKTTYPE_ENT_INCREMENTAL_UPDATE:',
+      '         switch(param1.type)\n         {\n            case GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET:\n               this.GoblinKidnappersApplySnapshot(param1);\n               break;\n            case PKTTYPE_ENT_INCREMENTAL_UPDATE:',
+      'LinkUpdater snapshot dispatch'
+    );
+  }
+
+  if (!source.includes('private function GoblinKidnappersApplySnapshot(')) {
+    source = replaceExact(
+      source,
+      '      public function method_1750() : void',
+      `      private function GoblinKidnappersSendControl(param1:uint, param2:uint, param3:uint = 0) : void
+      {
+         var _loc4_:Packet = null;
+         if(!this.var_1 || !this.var_1.serverConn)
+         {
+            return;
+         }
+         _loc4_ = new Packet(GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET);
+         _loc4_.method_6(param1,2);
+         _loc4_.method_4(GOBLIN_KIDNAPPERS_PROTOCOL);
+         _loc4_.method_13(goblinKidnappersScope);
+         _loc4_.method_4(param2);
+         if(param1 == 0)
+         {
+            _loc4_.method_6(param3,2);
+         }
+         this.var_1.serverConn.SendPacket(_loc4_);
+      }
+
+      private function GoblinKidnappersApplySnapshot(param1:Packet) : void
+      {
+         var _loc2_:uint = param1.method_4();
+         var _loc3_:String = param1.method_13();
+         var _loc4_:int = int(param1.method_4());
+         var _loc5_:Object = null;
+         var _loc6_:Boolean = false;
+         var _loc7_:Object = goblinKidnappersSnapshot;
+         if(_loc2_ != GOBLIN_KIDNAPPERS_PROTOCOL)
+         {
+            return;
+         }
+         try
+         {
+            _loc5_ = JSON.parse(param1.method_13());
+         }
+         catch(error:Error)
+         {
+            return;
+         }
+         if(goblinKidnappersScope && goblinKidnappersScope != _loc3_)
+         {
+            goblinKidnappersRevision = -1;
+            goblinKidnappersSnapshot = null;
+            goblinKidnappersSnapshotReady = false;
+            _loc7_ = null;
+         }
+         goblinKidnappersScope = _loc3_;
+         if(_loc4_ < goblinKidnappersRevision)
+         {
+            this.GoblinKidnappersSendControl(0,uint(goblinKidnappersRevision),2);
+            return;
+         }
+         if(_loc4_ == goblinKidnappersRevision && goblinKidnappersSnapshotReady)
+         {
+            this.GoblinKidnappersSendControl(0,uint(goblinKidnappersRevision),1);
+            return;
+         }
+         _loc6_ = goblinKidnappersRevision >= 0 && _loc4_ > goblinKidnappersRevision + 1;
+         if(_loc7_ && _loc7_.boss && _loc5_.boss)
+         {
+            goblinKidnappersWave80Pending = !Boolean(_loc7_.boss.wave80) && Boolean(_loc5_.boss.wave80);
+            goblinKidnappersWave50Pending = !Boolean(_loc7_.boss.wave50) && Boolean(_loc5_.boss.wave50);
+            goblinKidnappersWave33Pending = !Boolean(_loc7_.boss.wave33) && Boolean(_loc5_.boss.wave33);
+         }
+         goblinKidnappersSnapshot = _loc5_;
+         goblinKidnappersRevision = _loc4_;
+         goblinKidnappersSnapshotReady = true;
+         this.GoblinKidnappersSendControl(0,uint(goblinKidnappersRevision),_loc6_ ? 3 : 0);
+         if(_loc6_)
+         {
+            this.GoblinKidnappersSendControl(1,uint(goblinKidnappersRevision));
+         }
+      }
+
+      public function method_1750() : void`,
+      'LinkUpdater snapshot handler'
+    );
+  }
+  return source;
 }
 
-function patchRoom(source) {
-    const eol = source.includes('\r\n') ? '\r\n' : '\n';
-    const join = (lines) => lines.join(eol);
-
-    if (source.includes('null.bDisabled = param3 != "On";')) {
-        source = replaceExact(
-            source,
-            join([
-                '            var _loc4_:Door = this.var_1.level.method_1462(param2);',
-                '            if(_loc4_)',
-                '            {',
-                '               null.bDisabled = param3 != "On";',
-                '            }'
-            ]),
-            join([
-                '            var _loc4_:Door = this.var_1.level.method_1462(param2);',
-                '            if(_loc4_)',
-                '            {',
-                '               _loc4_.bDisabled = param3 != "On";',
-                '            }'
-            ]),
-            'Room decompile fix: door state'
-        );
-    }
-
-    if (source.includes('if((Boolean(_loc5_)) && null.entState != Entity.const_6)')) {
-        source = replaceExact(
-            source,
-            join([
-                '            var _loc5_:Entity = this.var_1.GetEntFromID(int(param2));',
-                '            if((Boolean(_loc5_)) && null.entState != Entity.const_6)',
-                '            {',
-                '               null.gfx.m_Seq.method_34(Seq.C_USEPOWER,param3,true);',
-                '            }'
-            ]),
-            join([
-                '            var _loc5_:Entity = this.var_1.GetEntFromID(int(param2));',
-                '            if((Boolean(_loc5_)) && _loc5_.entState != Entity.const_6)',
-                '            {',
-                '               _loc5_.gfx.m_Seq.method_34(Seq.C_USEPOWER,param3,true);',
-                '            }'
-            ]),
-            'Room decompile fix: entity animation'
-        );
-    }
-
-    if (source.includes('var _loc34_:SuperAnimInstance = this.method_67(null);')) {
-        source = replaceExact(
-            source,
-            join([
-                '               var _loc33_:String = "am_WaveFG" + (_loc10_ == 1 ? 14 : _loc10_ - 1);',
-                '               var _loc34_:SuperAnimInstance = this.method_67(null);',
-                '               _loc17_.x = null.m_TheDO.x + 200 + Math.random() * 200;'
-            ]),
-            join([
-                '               var _loc33_:String = "am_WaveFG" + (_loc10_ == 1 ? 14 : _loc10_ - 1);',
-                '               var _loc34_:SuperAnimInstance = this.method_67(_loc33_);',
-                '               _loc17_.x = _loc34_.m_TheDO.x + 200 + Math.random() * 200;'
-            ]),
-            'Room decompile fix: wave animation anchor'
-        );
-    }
-
-    if (source.includes('var _loc8_:* = §§findproperty(_loc6_);')) {
-        source = replaceExact(
-            source,
-            join([
-                '         var _loc7_:int = int(_loc1_.length);',
-                '         _loc2_ = 0;',
-                '         while(_loc2_ < _loc7_)',
-                '         {',
-                '            _loc3_ = _loc1_[_loc2_];',
-                '            _loc3_.aggroTeamID = 1;',
-                '            if(_loc2_ + 1 < _loc7_)',
-                '            {',
-                '               var _loc6_:a_Cue = _loc1_[_loc2_ + 1];',
-                '               if(_loc6_.x - _loc3_.x > const_1046)',
-                '               {',
-                '                  var _loc8_:* = §§findproperty(_loc6_);',
-                '                  var _loc9_:Number = Number(_loc8_._loc6_) + 1;',
-                '                  _loc8_._loc6_ = _loc9_;',
-                '               }',
-                '            }',
-                '            _loc2_++;',
-                '         }'
-            ]),
-            join([
-                '         var _loc6_:int = 1;',
-                '         var _loc8_:int = int(_loc1_.length);',
-                '         _loc2_ = 0;',
-                '         while(_loc2_ < _loc8_)',
-                '         {',
-                '            _loc3_ = _loc1_[_loc2_];',
-                '            _loc3_.aggroTeamID = _loc6_;',
-                '            if(_loc2_ + 1 < _loc8_)',
-                '            {',
-                '               var _loc7_:a_Cue = _loc1_[_loc2_ + 1];',
-                '               if(_loc7_.x - _loc3_.x > const_1046)',
-                '               {',
-                '                  _loc6_++;',
-                '               }',
-                '            }',
-                '            _loc2_++;',
-                '         }'
-            ]),
-            'Room decompile fix: aggro team counter'
-        );
-    }
-
-    if (!source.includes('this.var_1.level.internalName == "TutorialDungeon"')) {
-        source = replaceExact(
-            source,
-            join([
-                '      public function method_1264() : Number',
-                '      {',
-                '         if(!this.var_2261)',
-                '         {',
-                '            return 1;',
-                '         }',
-                '         if(Boolean(this.var_2261) && !this.var_802)',
-                '         {',
-                '            return 0;',
-                '         }',
-                '         if(!this.var_802)',
-                '         {',
-                '            return 1;',
-                '         }',
-                '         var _loc1_:uint = this.method_1990();',
-                '         if(_loc1_ >= this.var_802)',
-                '         {',
-                '            return 0;',
-                '         }',
-                '         if(this.var_1217 > this.var_802)',
-                '         {',
-                '            this.var_1217 = this.var_802;',
-                '         }',
-                '         return 1 - (_loc1_ + this.var_1217) / this.var_802;',
-                '      }'
-            ]),
-            join([
-                '      public function method_1264() : Number',
-                '      {',
-                '         var _loc1_:uint = 0;',
-                '         if(!this.var_2261)',
-                '         {',
-                '            if(this.var_1 && this.var_1.level && this.var_1.level.internalName == "TutorialDungeon")',
-                '            {',
-                '               _loc1_ = this.method_348();',
-                '               if(_loc1_)',
-                '               {',
-                '                  this.var_2261 = _loc1_;',
-                '                  this.var_802 = this.method_1990();',
-                '               }',
-                '            }',
-                '            if(!this.var_2261)',
-                '            {',
-                '               return 1;',
-                '            }',
-                '         }',
-                '         if(Boolean(this.var_2261) && !this.var_802)',
-                '         {',
-                '            return 0;',
-                '         }',
-                '         if(!this.var_802)',
-                '         {',
-                '            return 1;',
-                '         }',
-                '         _loc1_ = this.method_1990();',
-                '         if(_loc1_ >= this.var_802)',
-                '         {',
-                '            return 0;',
-                '         }',
-                '         if(this.var_1217 > this.var_802)',
-                '         {',
-                '            this.var_1217 = this.var_802;',
-                '         }',
-                '         return 1 - (_loc1_ + this.var_1217) / this.var_802;',
-                '      }'
-            ]),
-            'Room tutorial bootstrap in method_1264'
-        );
-    }
-
-    return source;
+function verify(linkUpdater) {
+  const linkMarkers = [
+    'GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET:uint = 277',
+    'private function GoblinKidnappersApplySnapshot(param1:Packet)',
+    'case GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET:',
+    'GoblinKidnappersShouldSuppressCue',
+    'public static function GoblinKidnappersRequestObjective(',
+    'goblinKidnappersSnapshot.parrots]',
+    'String(_loc3_.state) == "removed"',
+    'GoblinKidnappersConsumeBossWave',
+    'this.GoblinKidnappersSendControl(1,uint(goblinKidnappersRevision));'
+  ];
+  for (const marker of linkMarkers) if (!linkUpdater.includes(marker)) throw new Error(`LinkUpdater missing ${marker}`);
+  const uniqueMarkers = [
+    'GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET:uint = 277',
+    'private function GoblinKidnappersApplySnapshot(param1:Packet)',
+    'case GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET:',
+    'public static function GoblinKidnappersRequestObjective(',
+    'goblinKidnappersUpdater = this;'
+  ];
+  for (const marker of uniqueMarkers) {
+    const occurrences = linkUpdater.split(marker).length - 1;
+    if (occurrences !== 1) throw new Error(`LinkUpdater expected exactly one ${marker}, found ${occurrences}`);
+  }
 }
 
-function assertVerification(content, checks, targetLabel) {
-    for (const check of checks) {
-        if (!content.includes(check.needle)) {
-            throw new Error(`${targetLabel} is missing verification marker: ${check.label}`);
-        }
-    }
-}
-
-function verifyPatchedScripts(class112Source, linkUpdaterSource, roomSource, swfPath) {
-    const label = path.basename(swfPath);
-    assertVerification(
-        class112Source,
-        [
-            { label: 'class_112 method_2048', needle: 'private function method_2048(param1:Level) : uint' },
-            { label: 'class_112 follower 99 clamp', needle: 'return param1.var_690 >= 100 ? 99 : param1.var_690;' },
-            { label: 'class_112 render callsite', needle: 'this.var_327.SetText(this.method_2048(_loc1_) + "%");' }
-        ],
-        `${label} class_112`
-    );
-    assertVerification(
-        linkUpdaterSource,
-        [
-            { label: 'LinkUpdater tutorial helper', needle: 'private function method_1912(param1:Entity) : void' },
-            { label: 'LinkUpdater tutorial scope', needle: 'this.var_1.level.internalName != "TutorialDungeon"' },
-            { label: 'LinkUpdater room bind', needle: 'param1.var_1609 = _loc2_;' },
-            { label: 'LinkUpdater room vector insert', needle: '_loc2_.var_229.indexOf(param1) == -1' }
-        ],
-        `${label} LinkUpdater`
-    );
-    assertVerification(
-        roomSource,
-        [
-            { label: 'Room tutorial bootstrap scope', needle: 'this.var_1.level.internalName == "TutorialDungeon"' },
-            { label: 'Room tutorial hostile bootstrap', needle: 'this.var_2261 = _loc1_;' },
-            { label: 'Room tutorial weighted bootstrap', needle: 'this.var_802 = this.method_1990();' }
-        ],
-        `${label} Room`
-    );
-}
-
-function exportScripts(ffdecPath, workRoot, swfPath) {
-    fs.rmSync(workRoot, { recursive: true, force: true });
-    fs.mkdirSync(workRoot, { recursive: true });
-    runFfdec(ffdecPath, ['-selectclass', 'LinkUpdater,Room,class_112', '-export', 'script', workRoot, swfPath]);
-
-    const scriptsRoot = path.join(workRoot, 'scripts');
-    const paths = {
-        scriptsRoot,
-        linkUpdater: path.join(scriptsRoot, 'LinkUpdater.as'),
-        room: path.join(scriptsRoot, 'Room.as'),
-        class112: path.join(scriptsRoot, 'class_112.as')
-    };
-
-    for (const filePath of Object.values(paths)) {
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`FFDec export did not produce expected script: ${filePath}`);
-        }
-    }
-
-    return paths;
-}
-
-function patchSwf(repoRoot, ffdecPath, swfPath, class112Template) {
-    const workRoot = path.join(
-        repoRoot,
-        'build',
-        'ffdec-dungeonblitz-tutorial-party-progress',
-        path.basename(swfPath, path.extname(swfPath))
-    );
-    const patchedSwfPath = path.join(workRoot, `${path.basename(swfPath, path.extname(swfPath))}.patched.swf`);
-    const exported = exportScripts(ffdecPath, workRoot, swfPath);
-
-    const originalLinkUpdater = fs.readFileSync(exported.linkUpdater, 'utf8');
-    const originalRoom = fs.readFileSync(exported.room, 'utf8');
-    const originalClass112 = fs.readFileSync(exported.class112, 'utf8');
-
-    try {
-        verifyPatchedScripts(originalClass112, originalLinkUpdater, originalRoom, swfPath);
-        console.log(`SWF already contains tutorial follower fix: ${swfPath}`);
-        return;
-    } catch (_error) {
-    }
-
-    const patchedLinkUpdater = patchLinkUpdater(originalLinkUpdater);
-    const patchedRoom = patchRoom(originalRoom);
-    const patchedClass112 = class112Template;
-
-    fs.writeFileSync(exported.linkUpdater, patchedLinkUpdater, 'utf8');
-    fs.writeFileSync(exported.room, patchedRoom, 'utf8');
-    fs.writeFileSync(exported.class112, patchedClass112, 'utf8');
-
-    runFfdec(ffdecPath, ['-importScript', swfPath, patchedSwfPath, exported.scriptsRoot]);
-    fs.copyFileSync(patchedSwfPath, swfPath);
-    console.log(`Patched tutorial follower fix into ${swfPath}`);
-}
-
-function verifySwf(repoRoot, ffdecPath, swfPath) {
-    const workRoot = path.join(
-        repoRoot,
-        'build',
-        'ffdec-dungeonblitz-tutorial-party-progress-verify',
-        path.basename(swfPath, path.extname(swfPath))
-    );
-    const exported = exportScripts(ffdecPath, workRoot, swfPath);
-    verifyPatchedScripts(
-        fs.readFileSync(exported.class112, 'utf8'),
-        fs.readFileSync(exported.linkUpdater, 'utf8'),
-        fs.readFileSync(exported.room, 'utf8'),
-        swfPath
-    );
-    console.log(`Verified tutorial follower fix markers in ${swfPath}`);
+function exportScripts(ffdec, work, swf) {
+  fs.rmSync(work, { recursive: true, force: true });
+  fs.mkdirSync(work, { recursive: true });
+  runFfdec(ffdec, ['-selectclass', 'LinkUpdater', '-export', 'script', work, swf]);
+  const scripts = path.join(work, 'scripts');
+  return { scripts, link: path.join(scripts, 'LinkUpdater.as') };
 }
 
 function main() {
-    const repoRoot = resolveRepoRoot();
-    const args = parseArgs(process.argv);
-    const ffdecPath = detectFfdec(repoRoot, args.ffdec);
-    const class112TemplatePath = path.join(
-        repoRoot,
-        'src',
-        'client',
-        'ffdec-patches',
-        'DungeonBlitz.localhost',
-        'scripts',
-        'class_112.as'
-    );
-
-    if (!ffdecPath) {
-        throw new Error('FFDec not found. Pass --ffdec or restore the repo-bundled FFDec app.');
-    }
-    if (!fs.existsSync(class112TemplatePath)) {
-        throw new Error(`class_112 template not found: ${class112TemplatePath}`);
-    }
-    const class112Template = fs.readFileSync(class112TemplatePath, 'utf8');
-
-    const swfs = (args.swfs.length ? args.swfs : TARGET_SWFS).map((entry) => resolvePath(repoRoot, entry));
-    for (const swfPath of swfs) {
-        if (!fs.existsSync(swfPath)) {
-            throw new Error(`SWF not found: ${swfPath}`);
-        }
-    }
-
-    if (args.verify) {
-        for (const swfPath of swfs) {
-            verifySwf(repoRoot, ffdecPath, swfPath);
-        }
-        return;
-    }
-
-    for (const swfPath of swfs) {
-        patchSwf(repoRoot, ffdecPath, swfPath, class112Template);
-    }
+  const root = repoRoot();
+  const args = parseArgs(process.argv);
+  const swf = resolveFrom(root, args.swf);
+  const ffdec = detectFfdec(root, args.ffdec);
+  if (!ffdec) throw new Error('FFDec not found; pass --ffdec.');
+  const work = path.join(root, 'build', args.verify ? 'ffdec-goblin-snapshot-verify' : 'ffdec-goblin-snapshot-patch');
+  const exported = exportScripts(ffdec, work, swf);
+  let link = fs.readFileSync(exported.link, 'utf8').replace(/\r\n/g, '\n');
+  if (args.verify) {
+    verify(link);
+    console.log(`Verified Goblin Kidnappers snapshot protocol in ${swf}`);
+    return;
+  }
+  const patchedLink = patchLinkUpdater(link);
+  verify(patchedLink);
+  if (patchedLink === link) {
+    console.log(`Goblin Kidnappers snapshot protocol already present in ${swf}`);
+    return;
+  }
+  fs.writeFileSync(exported.link, patchedLink, 'utf8');
+  const patchedSwf = path.join(work, 'DungeonBlitz.patched.swf');
+  runFfdec(ffdec, ['-importScript', swf, patchedSwf, exported.scripts]);
+  fs.copyFileSync(patchedSwf, swf);
+  const verifyExport = exportScripts(ffdec, path.join(root, 'build', 'ffdec-goblin-snapshot-verify'), swf);
+  verify(fs.readFileSync(verifyExport.link, 'utf8'));
+  console.log(`Patched and verified Goblin Kidnappers snapshot protocol in ${swf}`);
 }
 
-try {
-    main();
-} catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-}
+try { main(); } catch (error) { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; }

@@ -42,6 +42,7 @@ import {
     normalizeLevelInstanceId
 } from '../core/LevelScope';
 import { getCharacterRuntimeLevel, getPartyRuntimeLevelForClient } from '../core/RuntimeLevel';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
 
 const db = new JsonAdapter();
 
@@ -1306,6 +1307,12 @@ export class CharacterHandler {
         const buildingStateCharacter = isVisitingAnotherPlayersCraftTown(client)
             ? client.craftTownHostCharacter
             : null;
+        const tutorialEntryState = TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)
+            ? TutorialDungeonMechanics.getClientState(client)
+            : null;
+        if (tutorialEntryState && client.character) {
+            client.character.questTrackerState = tutorialEntryState.progress;
+        }
         const pdPkt = WorldEnter.buildPlayerDataPacket(
             client.character,
             token,
@@ -1319,6 +1326,14 @@ export class CharacterHandler {
             buildingStateCharacter
         );
         const pdBuffer = pdPkt.toBuffer();
+
+        // Goblin Kidnappers snapshots are deliberately queued before Player
+        // Data. Player Data causes the Flash client to construct the level, so
+        // this ordering lets authored room scripts consult completed state on
+        // their first visible frame instead of spawning and then correcting it.
+        if (TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel)) {
+            TutorialDungeonMechanics.sendSnapshot(client, 'pre_level_load');
+        }
 
         client.send(0x10, pdBuffer);
         console.log(`[GameLogin] Sent 0x10 (Player Data)`);

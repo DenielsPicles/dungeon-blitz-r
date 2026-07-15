@@ -84,15 +84,18 @@ export class NpcLoader {
             filtered = filtered.filter((npc) => !bakedNpcs.has(String(npc?.name ?? '')));
         }
 
-        if (levelName === 'TutorialDungeon') {
+        if (TutorialDungeonMechanics.isTutorialDungeon(levelName)) {
             const bakedNpcs = new Set(['IntroParrot', 'IntroGoblinNPC', 'NPCAnna']);
             filtered = filtered.filter((npc) => !bakedNpcs.has(String(npc?.name ?? '')));
             const knownIds = new Set(filtered.map((npc) => Number(npc?.id ?? 0)));
+            const authorityIds = new Set(
+                TutorialDungeonMechanics.getServerAuthorityEntities().map((entry) => entry.id)
+            );
             for (const npc of npcs) {
-                if (!TutorialDungeonMechanics.isCompletionBoss(levelName, npc)) {
+                const id = Number(npc?.id ?? 0);
+                if (!authorityIds.has(id)) {
                     continue;
                 }
-                const id = Number(npc?.id ?? 0);
                 if (knownIds.has(id)) {
                     continue;
                 }

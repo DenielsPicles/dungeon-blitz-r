@@ -5,51 +5,37 @@ import { GameData } from '../core/GameData';
 import { GlobalState } from '../core/GlobalState';
 import { LevelConfig } from '../core/LevelConfig';
 import { getClientLevelScope } from '../core/LevelScope';
-import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
-import { DungeonCompletionSystem } from '../core/DungeonCompletionSystem';
-import { MissionLoader } from '../data/MissionLoader';
+import {
+    applyTutorialDungeonSnapshotClientState,
+    GOBLIN_KIDNAPPERS_INITIAL_PROGRESS,
+    GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET_ID,
+    TutorialDungeonClientSnapshotState,
+    TutorialDungeonMechanics,
+    TutorialDungeonSnapshot
+} from '../core/TutorialDungeonMechanics';
 import { NpcLoader } from '../data/NpcLoader';
-import { MissionID } from '../data/runtime';
 import { LevelHandler } from '../handlers/LevelHandler';
-import { EntityHandler } from '../handlers/EntityHandler';
-import { MissionHandler } from '../handlers/MissionHandler';
 import { BitBuffer } from '../network/protocol/bitBuffer';
 
 type SentPacket = { id: number; payload: Buffer };
 
 type FakeClient = {
+    authenticated: boolean;
     currentLevel: string;
     levelInstanceId: string;
     currentRoomId: number;
     token: number;
-    userId: null;
+    userId: number;
     playerSpawned: boolean;
     clientEntID: number;
     character: any;
-    characters: any[];
     sentPackets: SentPacket[];
     entities: Map<number, any>;
     knownEntityIds: Set<number>;
     entityIdAliases: Map<number, number>;
     startedRoomEvents: Set<string>;
-    triggeredLevelStates: Set<string>;
-    pendingDungeonCompletionScope: string;
-    pendingDungeonCompletionRequestedAt: number;
-    pendingDungeonCompletionLastSkitAt: number;
-    pendingDungeonCompletionNotBeforeAt: number;
-    pendingDungeonCompletionSettleMs: number;
-    pendingDungeonCompletionPayload: Buffer | null;
-    pendingDungeonCompletionTimer: NodeJS.Timeout | null;
-    pendingDungeonCompletionFlushActive: boolean;
-    activeDungeonCutsceneScope: string;
-    activeDungeonCutsceneRoomId: number;
-    activeDungeonCutsceneJoinedAtDialogIndex: number;
-    activeDungeonCutsceneLocalDialogIndex: number;
-    lastDungeonCutsceneStartScope: string;
-    lastDungeonCutsceneStartAt: number;
-    lastDungeonCutsceneEndScope: string;
-    lastDungeonCutsceneEndAt: number;
-    armPendingTransferGrace(): void;
+    lastEmoteName: string;
+    lastEmoteAt: number;
     send(id: number, payload: Buffer): void;
     sendBitBuffer(id: number, bb: BitBuffer): void;
 };
@@ -59,68 +45,40 @@ function ensureDataLoaded(): void {
     if (!LevelConfig.has('TutorialDungeon')) {
         LevelConfig.load(dataDir);
     }
-    if (!MissionLoader.getMissionDef(MissionID.RescueAnna)) {
-        MissionLoader.load(dataDir);
-    }
     if (Object.keys(GameData.ENTTYPES).length === 0) {
         GameData.load(dataDir);
     }
     NpcLoader.load(dataDir);
 }
 
-function createFakeClient(name: string, token: number): FakeClient {
+function createFakeClient(name: string, token: number, instanceId: string): FakeClient {
     const sentPackets: SentPacket[] = [];
+    const clientEntID = token + 100000;
     const character = {
         name,
-        CurrentLevel: { name: 'TutorialDungeon', x: 22600, y: 2950 },
-        PreviousLevel: { name: 'NewbieRoad', x: 1421, y: 826 },
-        missions: {
-            [String(MissionID.RescueAnna)]: {
-                state: 1,
-                currCount: 0
-            }
-        },
-        questTrackerState: 11,
+        CurrentLevel: { name: 'TutorialDungeon', x: 1327, y: 1880 },
+        questTrackerState: GOBLIN_KIDNAPPERS_INITIAL_PROGRESS,
         level: 12,
         xp: 0,
         gold: 0
     };
-
-    return {
+    const client: FakeClient = {
+        authenticated: true,
         currentLevel: 'TutorialDungeon',
-        levelInstanceId: `goblin-kidnappers-${token}`,
-        currentRoomId: 11,
+        levelInstanceId: instanceId,
+        currentRoomId: 1,
         token,
-        userId: null,
+        userId: token,
         playerSpawned: true,
-        clientEntID: token + 1000,
+        clientEntID,
         character,
-        characters: [character],
         sentPackets,
         entities: new Map(),
         knownEntityIds: new Set(),
         entityIdAliases: new Map(),
         startedRoomEvents: new Set(),
-        triggeredLevelStates: new Set(),
-        pendingDungeonCompletionScope: '',
-        pendingDungeonCompletionRequestedAt: 0,
-        pendingDungeonCompletionLastSkitAt: 0,
-        pendingDungeonCompletionNotBeforeAt: 0,
-        pendingDungeonCompletionSettleMs: 0,
-        pendingDungeonCompletionPayload: null,
-        pendingDungeonCompletionTimer: null,
-        pendingDungeonCompletionFlushActive: false,
-        activeDungeonCutsceneScope: '',
-        activeDungeonCutsceneRoomId: 0,
-        activeDungeonCutsceneJoinedAtDialogIndex: 0,
-        activeDungeonCutsceneLocalDialogIndex: 0,
-        lastDungeonCutsceneStartScope: '',
-        lastDungeonCutsceneStartAt: 0,
-        lastDungeonCutsceneEndScope: '',
-        lastDungeonCutsceneEndAt: 0,
-        armPendingTransferGrace() {
-            return undefined;
-        },
+        lastEmoteName: '',
+        lastEmoteAt: 0,
         send(id: number, payload: Buffer) {
             sentPackets.push({ id, payload: Buffer.from(payload) });
         },
@@ -128,330 +86,463 @@ function createFakeClient(name: string, token: number): FakeClient {
             sentPackets.push({ id, payload: bb.toBuffer() });
         }
     };
+    setRoom(client, 1, 1327, 1880);
+    return client;
 }
 
-function bossEntity(hp: number = 0, maxHp: number = 1000): any {
-    return {
-        id: TutorialDungeonMechanics.TAG_UGO_BOSS_ID,
-        name: 'GoblinBoss1',
-        displayName: 'Tag Ugo',
-        isPlayer: false,
-        roomId: 11,
-        team: EntityTeam.ENEMY,
-        entState: hp <= 0 ? EntityState.DEAD : EntityState.ACTIVE,
-        hp,
-        maxHp,
-        dead: hp <= 0,
-        clientDefeatVerified: true
-    };
+function setRoom(client: FakeClient, roomId: number, x: number, y: number): void {
+    client.currentRoomId = roomId;
+    client.character.CurrentLevel = { name: 'TutorialDungeon', x, y };
+    client.entities.set(client.clientEntID, {
+        id: client.clientEntID,
+        isPlayer: true,
+        x,
+        y,
+        roomId
+    });
 }
 
-function annaChainEntity(): any {
-    return {
-        id: TutorialDungeonMechanics.ANNA_CHAIN_ID,
-        name: 'Chains03',
-        isPlayer: false,
-        roomId: 11,
-        team: EntityTeam.ENEMY,
-        entState: EntityState.DEAD,
-        hp: 0,
-        maxHp: 100,
-        dead: true,
-        clientDefeatVerified: true
-    };
+function register(...clients: FakeClient[]): void {
+    for (const client of clients) {
+        GlobalState.sessionsByToken.set(client.token, client as never);
+    }
 }
 
-function entity(id: number, name: string): any {
-    return {
-        id,
-        name,
-        isPlayer: false,
-        roomId: 2,
-        team: EntityTeam.ENEMY,
-        entState: EntityState.DEAD,
-        hp: 0,
-        maxHp: 100,
-        dead: true,
-        clientDefeatVerified: true
-    };
+function clearHarness(...scopes: string[]): void {
+    GlobalState.sessionsByToken.clear();
+    GlobalState.levelEntities.clear();
+    GlobalState.levelQuestProgress.clear();
+    GlobalState.dungeonCutscenes.clear();
+    for (const scope of scopes) {
+        TutorialDungeonMechanics.resetState(scope);
+    }
 }
 
-function buildRoomBossInfoPayload(roomId: number, bossId: number, bossName: string): Buffer {
+function latestSnapshot(client: FakeClient): TutorialDungeonSnapshot {
+    const packet = [...client.sentPackets].reverse().find((entry) => entry.id === GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET_ID);
+    assert.ok(packet, `${client.character.name} should have a snapshot packet`);
+    return TutorialDungeonMechanics.parseSnapshotPayload(packet.payload);
+}
+
+function revision(client: FakeClient): number {
+    return TutorialDungeonMechanics.getClientState(client as never)?.revision ?? -1;
+}
+
+function progress(client: FakeClient): number {
+    return TutorialDungeonMechanics.getClientState(client as never)?.progress ?? -1;
+}
+
+function logicalObjectiveRequest(client: FakeClient, key: string, roomId: number, expectedRevision = revision(client)): Buffer {
     const bb = new BitBuffer(false);
+    bb.writeMethod6(2, 2);
+    bb.writeMethod4(1);
+    bb.writeMethod13(getClientLevelScope(client as never));
+    bb.writeMethod4(expectedRevision);
+    bb.writeMethod13(key);
     bb.writeMethod9(roomId);
-    bb.writeMethod9(bossId);
-    bb.writeMethod26(bossName);
-    bb.writeMethod9(0);
-    bb.writeMethod26('');
     return bb.toBuffer();
 }
 
-function buildHostileFullUpdate(entityId: number, name: string, roomId: number): Buffer {
-    const payload = (EntityHandler as any).buildEntityFullUpdatePayload({
-        id: entityId,
-        name,
-        isPlayer: false,
-        x: 1500,
-        y: 900,
-        v: 0,
-        team: EntityTeam.ENEMY,
-        renderDepthOffset: 0,
-        characterName: '',
-        dramaAnim: '',
-        sleepAnim: '',
-        summonerId: 0,
-        powerId: 0,
-        entState: EntityState.ACTIVE,
-        facingLeft: false,
-        running: false,
-        jumping: false,
-        dropping: false,
-        backpedal: false,
-        roomId
-    });
-    return Buffer.concat([payload, Buffer.from([0])]);
+function roomPacket(roomId: number): Buffer {
+    const bb = new BitBuffer(false);
+    bb.writeMethod9(roomId);
+    return bb.toBuffer();
 }
 
-function packetCount(client: FakeClient, packetId: number): number {
-    return client.sentPackets.filter((packet) => packet.id === packetId).length;
-}
-
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function resetFor(client: FakeClient): void {
-    const scope = getClientLevelScope(client as never);
-    TutorialDungeonMechanics.resetState(scope);
-    GlobalState.levelEntities.delete(scope);
-    GlobalState.levelQuestProgress.delete(scope);
-    DungeonCompletionSystem.reset(scope);
-    GlobalState.dungeonCutscenes.clear();
-    GlobalState.sessionsByToken.clear();
-    GlobalState.partyGroups.clear();
-    GlobalState.partyByMember.clear();
-    if (client.pendingDungeonCompletionTimer) {
-        clearTimeout(client.pendingDungeonCompletionTimer);
-        client.pendingDungeonCompletionTimer = null;
+function completeIntroAndDummies(client: FakeClient): void {
+    setRoom(client, 1, 1327, 1880);
+    assert.equal(TutorialDungeonMechanics.breakChain(client as never, 3268190, revision(client)).status, 'applied');
+    setRoom(client, 2, 4000, 2099);
+    for (const id of [4841054, 4906590, 4972126]) {
+        assert.equal(TutorialDungeonMechanics.completeDummy(client as never, id, revision(client)).status, 'applied');
     }
 }
 
-function testPartyLeaderSideEnemiesRemainClientPrivate(): void {
-    const leader = createFakeClient('PartyLeader', 61006);
-    const member = createFakeClient('PartyMember', 61007);
-    resetFor(leader);
-    member.levelInstanceId = leader.levelInstanceId;
-    GlobalState.sessionsByToken.set(leader.token, leader as never);
-    GlobalState.sessionsByToken.set(member.token, member as never);
-    GlobalState.partyGroups.set(900, {
-        id: 900,
-        leader: leader.character.name,
-        members: [leader.character.name, member.character.name],
-        locked: false
-    });
-    GlobalState.partyByMember.set('partyleader', 900);
-    GlobalState.partyByMember.set('partymember', 900);
-
-    const sideEnemyId = 7001001;
-    EntityHandler.handleEntityFullUpdate(
-        leader as never,
-        buildHostileFullUpdate(sideEnemyId, 'GoblinDagger', 2)
-    );
-
-    const localSideEnemy = leader.entities.get(sideEnemyId);
-    assert.equal(localSideEnemy?.clientSpawned, true, 'party leader side enemy must remain client-owned');
-    assert.equal(localSideEnemy?.hybridCanonicalHostile, undefined, 'side enemy must not become a server canonical');
-    assert.equal(
-        GlobalState.levelEntities.get(getClientLevelScope(leader as never))?.has(sideEnemyId) ?? false,
-        false,
-        'party leader side enemy must not enter authoritative shared dungeon state'
-    );
-    assert.equal(
-        EntityHandler.shouldMirrorClientSpawnEntityToParty('TutorialDungeon', localSideEnemy),
-        false,
-        'side enemy must not be mirrored through the party server path'
-    );
-    assert.equal(packetCount(member, 0x08), 0, 'side enemy must not be spawned for another party member');
-    assert.equal(
-        EntityHandler.shouldMirrorClientSpawnEntityToParty('TutorialDungeon', {
-            ...localSideEnemy,
-            id: TutorialDungeonMechanics.TAG_UGO_BOSS_ID,
-            name: 'GoblinBoss1'
-        }),
-        true,
-        'Tag Ugo must remain the only party-shared hostile'
-    );
+function completeTraversal(client: FakeClient): void {
+    setRoom(client, 4, 7271, 2074);
+    assert.equal(TutorialDungeonMechanics.startCutscene(client as never, 'traversal', 4, 'jump_and_drop', revision(client)).status, 'applied');
+    assert.equal(TutorialDungeonMechanics.advanceCutscene(client as never, 'traversal', 4, 2, revision(client)).status, 'applied');
+    assert.equal(TutorialDungeonMechanics.completeCutscene(client as never, 'traversal', 4, revision(client)).status, 'applied');
 }
 
-function testOnlyTagUgoIsServerSpawned(): void {
-    for (const levelName of ['TutorialDungeon', 'TutorialDungeonHard']) {
-        assert.equal(EntityHandler.usesServerAuthorityHostiles(levelName), true);
-        const serverNpcs = NpcLoader.getNpcsForLevel(levelName);
-        assert.equal(serverNpcs.length, 1, `${levelName} should retain exactly one server-spawned entity`);
-        assert.equal(serverNpcs[0].id, TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
-        assert.equal(serverNpcs[0].name, 'GoblinBoss1');
-        assert.equal(serverNpcs[0].team, EntityTeam.ENEMY);
-        assert.equal(serverNpcs[0].boss, true);
-        assert.equal(serverNpcs[0].serverOnlyObjective, false);
+function openChestAndGrantReward(client: FakeClient, id: number, roomId: number, x: number, y: number): void {
+    setRoom(client, roomId, x, y);
+    assert.equal(TutorialDungeonMechanics.openChest(client as never, id, revision(client)).status, 'applied');
+    assert.equal(TutorialDungeonMechanics.noteRewardsGranted(client as never, { id }).status, 'applied');
+}
+
+function testStableCatalogAndInternalIdentity(): void {
+    assert.equal(LevelConfig.normalizeLevelName('GoblinKidnappers'), 'TutorialDungeon');
+    assert.equal(TutorialDungeonMechanics.isTutorialDungeon('TutorialDungeonHard'), false);
+    const authority = TutorialDungeonMechanics.getAuthorityEntities();
+    assert.deepEqual(
+        authority.filter((entry) => entry.role === 'dummy').map((entry) => entry.id),
+        [4841054, 4906590, 4972126]
+    );
+    assert.deepEqual(
+        authority.filter((entry) => entry.role === 'tutorial_chest' || entry.role === 'boss_chest').map((entry) => entry.id),
+        [4709982, 2612830, 2481758, 3989086]
+    );
+    assert.deepEqual(
+        authority.filter((entry) => entry.role === 'parrot').map((entry) => entry.id),
+        [3006046, 2743902, 384606, 4775518, 2547294, 712286, 3333726]
+    );
+    assert.equal(TutorialDungeonMechanics.getServerAuthorityEntities().length, 10);
+    const serverNpcs = NpcLoader.getNpcsForLevel('TutorialDungeon');
+    for (const expected of TutorialDungeonMechanics.getServerAuthorityEntities()) {
+        assert.ok(serverNpcs.some((npc) => npc.id === expected.id), `canonical NPC ${expected.id} should be registered`);
+    }
+    const objectiveWeight = TutorialDungeonMechanics.getObjectiveTable().reduce((sum, entry) => sum + entry.weight, 0);
+    assert.equal(GOBLIN_KIDNAPPERS_INITIAL_PROGRESS + objectiveWeight, 100);
+}
+
+function testChainLateJoinAndDuplicate(): void {
+    const a = createFakeClient('ChainA', 61001, 'chain-scope');
+    const b = createFakeClient('ChainB', 61002, 'chain-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a);
+
+    const initialRevision = revision(a);
+    assert.equal(initialRevision, 0);
+    const applied = TutorialDungeonMechanics.breakChain(a as never, 'chain:3268190', initialRevision);
+    assert.equal(applied.status, 'applied');
+    assert.equal(applied.revision, initialRevision + 1);
+    assert.equal(progress(a), 17);
+
+    const duplicate = TutorialDungeonMechanics.breakChain(a as never, 3268190, initialRevision);
+    assert.equal(duplicate.status, 'already_completed');
+    assert.equal(revision(a), applied.revision);
+    assert.equal(progress(a), 17);
+
+    register(b);
+    TutorialDungeonMechanics.sendSnapshot(b as never, 'late_join_test');
+    const snapshot = latestSnapshot(b);
+    assert.equal(snapshot.scope, scope);
+    assert.equal(snapshot.revision, applied.revision);
+    assert.equal(snapshot.progress, 17);
+    assert.equal(snapshot.chains['3268190'].broken, true);
+    assert.equal(snapshot.parrot.rescued, true);
+    assert.equal(snapshot.dummies['4841054'].completed, false);
+}
+
+function testDummyBroadcastAndLateJoin(): void {
+    const a = createFakeClient('DummyA', 61101, 'dummy-scope');
+    const b = createFakeClient('DummyB', 61102, 'dummy-scope');
+    const late = createFakeClient('DummyLate', 61103, 'dummy-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a, b);
+    TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a));
+    setRoom(a, 2, 4000, 2099);
+    setRoom(b, 2, 4000, 2099);
+    const beforeB = b.sentPackets.length;
+    const result = TutorialDungeonMechanics.completeDummy(a as never, 4841054, revision(a));
+    assert.equal(result.status, 'applied');
+    assert.ok(b.sentPackets.slice(beforeB).some((packet) => packet.id === GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET_ID));
+    assert.equal(latestSnapshot(b).dummies['4841054'].completed, true);
+    assert.equal(TutorialDungeonMechanics.completeDummy(b as never, 4841054, revision(b)).status, 'already_completed');
+    register(late);
+    TutorialDungeonMechanics.sendSnapshot(late as never, 'dummy_late_join');
+    assert.equal(latestSnapshot(late).dummies['4841054'].destroyed, true);
+}
+
+function testChestRewardsOnce(): void {
+    const a = createFakeClient('ChestA', 61201, 'chest-scope');
+    const b = createFakeClient('ChestB', 61202, 'chest-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a, b);
+    completeIntroAndDummies(a);
+    completeTraversal(a);
+    const tutorialChests = [
+        { id: 4709982, roomId: 5, x: 11228, y: 2381 },
+        { id: 2612830, roomId: 6, x: 13252, y: 2679 },
+        { id: 2481758, roomId: 8, x: 16680, y: 2566 }
+    ];
+    for (const chest of tutorialChests) {
+        setRoom(a, chest.roomId, chest.x, chest.y);
+        setRoom(b, chest.roomId, chest.x, chest.y);
+        assert.equal(TutorialDungeonMechanics.openChest(a as never, chest.id, revision(a)).status, 'applied');
+        assert.equal(TutorialDungeonMechanics.noteRewardsGranted(a as never, { id: chest.id }).status, 'applied');
+        const rewardRevision = revision(a);
+        assert.equal(TutorialDungeonMechanics.openChest(b as never, chest.id, revision(b)).status, 'already_completed');
+        assert.equal(TutorialDungeonMechanics.noteRewardsGranted(b as never, { id: chest.id }).status, 'already_completed');
+        assert.equal(revision(a), rewardRevision);
+        assert.equal(latestSnapshot(b).chests[String(chest.id)].rewardsGranted, true);
     }
 }
 
-function testPartyBossUsesOneSharedCanonicalWithoutVisibleServerDuplicate(): void {
-    const leader = createFakeClient('BossLeader', 61008);
-    const member = createFakeClient('BossMember', 61009);
-    resetFor(leader);
-    member.levelInstanceId = leader.levelInstanceId;
-    GlobalState.sessionsByToken.set(leader.token, leader as never);
-    GlobalState.sessionsByToken.set(member.token, member as never);
-    GlobalState.partyGroups.set(901, {
-        id: 901,
-        leader: leader.character.name,
-        members: [leader.character.name, member.character.name],
-        locked: false
-    });
-    GlobalState.partyByMember.set('bossleader', 901);
-    GlobalState.partyByMember.set('bossmember', 901);
+function testCutsceneLogicalStateAndLocalPresentation(): void {
+    const a = createFakeClient('CutsceneA', 61301, 'cutscene-scope');
+    const b = createFakeClient('CutsceneB', 61302, 'cutscene-scope');
+    const late = createFakeClient('CutsceneLate', 61303, 'cutscene-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a, b);
+    completeIntroAndDummies(a);
+    setRoom(a, 4, 7271, 2074);
+    setRoom(b, 4, 7271, 2074);
+    assert.equal(TutorialDungeonMechanics.startCutscene(a as never, 'traversal', 4, 'jump_and_drop', revision(a)).status, 'applied');
+    assert.equal(TutorialDungeonMechanics.advanceCutscene(a as never, 'traversal', 4, 3, revision(a)).status, 'applied');
+    assert.equal(latestSnapshot(b).cutscenes.traversal.sequenceStep, 3);
+    assert.equal(a.sentPackets.some((packet) => packet.id === 0x76), false, 'shared state must not send dialogue UI');
+    assert.equal(b.sentPackets.some((packet) => packet.id === 0x76), false, 'peer must not receive local dialogue UI');
+    register(late);
+    TutorialDungeonMechanics.sendSnapshot(late as never, 'active_cutscene_join');
+    assert.equal(latestSnapshot(late).cutscenes.traversal.state, 'active');
+    assert.equal(latestSnapshot(late).cutscenes.traversal.sequenceStep, 3);
+    assert.equal(TutorialDungeonMechanics.completeCutscene(a as never, 'traversal', 4, revision(a)).status, 'applied');
+    const completedRevision = revision(a);
+    assert.equal(TutorialDungeonMechanics.completeCutscene(b as never, 'traversal', 4, revision(b)).status, 'already_completed');
+    assert.equal(revision(a), completedRevision);
+    assert.equal(latestSnapshot(b).cutscenes.traversal.completionEffectApplied, true);
+}
 
-    EntityHandler.sendInitialLevelEntities(leader as never, leader.currentLevel);
-    EntityHandler.sendInitialLevelEntities(member as never, member.currentLevel);
+function testValidatedLogicalObjectiveRequests(): void {
+    const a = createFakeClient('ObjectiveA', 61311, 'objective-scope');
+    const late = createFakeClient('ObjectiveLate', 61312, 'objective-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a, late);
+    completeIntroAndDummies(a);
+    setRoom(a, 4, 7271, 2074);
 
-    const scope = getClientLevelScope(leader as never);
-    const levelMap = GlobalState.levelEntities.get(scope);
-    assert.ok(levelMap?.has(TutorialDungeonMechanics.TAG_UGO_BOSS_ID), 'shared scope should contain canonical Tag Ugo');
-    assert.equal(packetCount(leader, 0x0F), 0, 'leader must not receive a visible server boss duplicate');
-    assert.equal(packetCount(member, 0x0F), 0, 'member must not receive a visible server boss duplicate');
+    assert.equal(TutorialDungeonMechanics.startCutscene(a as never, 'traversal', 4, 'room_event_start', revision(a)).status, 'applied');
+    LevelHandler.handleRoomClose(a as never, roomPacket(4));
+    assert.equal(progress(a), 28, 'generic room-close packets must not complete a progress objective');
+    assert.equal(TutorialDungeonMechanics.getClientState(a as never)?.cutscenes.get('traversal')?.state, 'active');
 
-    leader.sentPackets.length = 0;
-    member.sentPackets.length = 0;
-    const leaderLocalBossId = 7002001;
-    const memberLocalBossId = 7002002;
-    EntityHandler.handleEntityFullUpdate(
-        leader as never,
-        buildHostileFullUpdate(leaderLocalBossId, 'GoblinBoss1', 2)
-    );
-    EntityHandler.handleEntityFullUpdate(
-        member as never,
-        buildHostileFullUpdate(memberLocalBossId, 'GoblinBoss1', 2)
-    );
+    const beforeRejected = revision(a);
+    TutorialDungeonMechanics.handleSnapshotControl(a as never, logicalObjectiveRequest(a, 'traversal', 4));
+    assert.equal(revision(a), beforeRejected, 'traversal request without a server-started room event must be rejected');
+    assert.equal(progress(a), 28);
 
+    a.startedRoomEvents.add('TutorialDungeon:5');
+    TutorialDungeonMechanics.handleSnapshotControl(a as never, logicalObjectiveRequest(a, 'traversal', 4));
+    assert.equal(revision(a), beforeRejected, 'traversal request outside the completed drop position must be rejected');
+    setRoom(a, 4, 7500, 2200);
+    TutorialDungeonMechanics.handleSnapshotControl(a as never, logicalObjectiveRequest(a, 'traversal', 4));
+    assert.equal(progress(a), 39);
+    assert.equal(TutorialDungeonMechanics.getClientState(a as never)?.cutscenes.get('traversal')?.state, 'completed');
+    const traversalRevision = revision(a);
+    TutorialDungeonMechanics.handleSnapshotControl(a as never, logicalObjectiveRequest(a, 'traversal', 4));
+    assert.equal(revision(a), traversalRevision, 'duplicate traversal request must be idempotent');
+
+    openChestAndGrantReward(a, 4709982, 5, 11228, 2381);
+    openChestAndGrantReward(a, 2612830, 6, 13252, 2679);
+    openChestAndGrantReward(a, 2481758, 8, 16680, 2566);
+    setRoom(a, 9, 17981, 2343);
+    const beforeCheer = revision(a);
+    TutorialDungeonMechanics.handleSnapshotControl(a as never, logicalObjectiveRequest(a, 'cheer_gate', 9));
+    assert.equal(revision(a), beforeCheer, 'cheer request without a recent self emote must be rejected');
+    a.lastEmoteName = 'Cheer L';
+    a.lastEmoteAt = Date.now();
+    TutorialDungeonMechanics.handleSnapshotControl(a as never, logicalObjectiveRequest(a, 'cheer_gate', 9));
+    assert.equal(progress(a), 83);
+    assert.equal(TutorialDungeonMechanics.getClientState(a as never)?.cutscenes.get('cheer_gate')?.state, 'completed');
+
+    TutorialDungeonMechanics.sendSnapshot(late as never, 'validated_objective_late_join');
+    const snapshot = latestSnapshot(late);
+    assert.equal(snapshot.cutscenes.traversal.state, 'completed');
+    assert.equal(snapshot.cutscenes.cheer_gate.state, 'completed');
+    assert.equal(snapshot.progress, 83);
+}
+
+function testRoomCheckpointAndParrotState(): void {
+    const a = createFakeClient('CheckpointA', 61321, 'checkpoint-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a);
+    assert.equal(TutorialDungeonMechanics.noteRoomStarted(a as never, 1).status, 'applied');
+    const roomOneRevision = revision(a);
+    assert.equal(TutorialDungeonMechanics.noteRoomStarted(a as never, 1).status, 'already_completed');
+    assert.equal(revision(a), roomOneRevision);
+    assert.equal(progress(a), 11, 'entering a room must not complete an objective');
+    assert.equal(TutorialDungeonMechanics.getClientState(a as never)?.parrots.get('3006046')?.state, 'waiting');
+
+    setRoom(a, 11, 22695, 2959);
+    const impossibleCheckpoint = TutorialDungeonMechanics.noteRoomStarted(a as never, 11);
+    assert.equal(impossibleCheckpoint.reason, 'missing_room_prerequisite:cutscene:cheer_gate');
+    assert.equal(TutorialDungeonMechanics.buildSnapshot(scope)!.checkpointRoomId, 1);
+
+    setRoom(a, 1, 1327, 1880);
+    assert.equal(TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a)).status, 'applied');
+    setRoom(a, 2, 4000, 2099);
+    assert.equal(TutorialDungeonMechanics.noteRoomStarted(a as never, 2).status, 'applied');
+    const snapshot = TutorialDungeonMechanics.buildSnapshot(scope)!;
+    assert.equal(snapshot.checkpointRoomId, 2);
+    assert.deepEqual(snapshot.unlockedRooms, [1, 2]);
+    assert.equal(snapshot.parrots['3006046'].state, 'removed');
+    assert.equal(snapshot.parrots['3006046'].sourceRoom, 'a_Room_Tutorial_01');
+    assert.equal(snapshot.parrots['3006046'].sourceVar, 'am_Parrot');
+    assert.equal(snapshot.parrots['2743902'].state, 'following');
+    assert.equal(snapshot.progress, 17, 'checkpoint updates must preserve objective-derived progress');
+}
+
+function testBossHpDeathRewardsAndCompletionOnce(): void {
+    const a = createFakeClient('BossA', 61401, 'boss-scope');
+    const b = createFakeClient('BossB', 61402, 'boss-scope');
+    const late = createFakeClient('BossLate', 61403, 'boss-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a, b);
+    completeIntroAndDummies(a);
+    completeTraversal(a);
+    openChestAndGrantReward(a, 4709982, 5, 11228, 2381);
+    openChestAndGrantReward(a, 2612830, 6, 13252, 2679);
+    openChestAndGrantReward(a, 2481758, 8, 16680, 2566);
+    setRoom(a, 9, 17981, 2343);
+    assert.equal(TutorialDungeonMechanics.startCutscene(a as never, 'cheer_gate', 9, 'cheer', revision(a)).status, 'applied');
+    assert.equal(TutorialDungeonMechanics.completeCutscene(a as never, 'cheer_gate', 9, revision(a)).status, 'applied');
+    setRoom(a, 11, 22695, 2959);
+    setRoom(b, 11, 22695, 2959);
     assert.equal(
-        EntityHandler.resolveEntityAlias(leader as never, leaderLocalBossId),
-        TutorialDungeonMechanics.TAG_UGO_BOSS_ID,
-        'leader local boss should proxy the shared canonical Tag Ugo'
+        TutorialDungeonMechanics.markBossDead(a as never, revision(a)).reason,
+        'missing_prerequisite:boss_encounter_started'
     );
-    assert.equal(
-        EntityHandler.resolveEntityAlias(member as never, memberLocalBossId),
-        TutorialDungeonMechanics.TAG_UGO_BOSS_ID,
-        'member local boss should proxy the same shared canonical Tag Ugo'
-    );
-    assert.equal(levelMap?.has(leaderLocalBossId), false, 'leader proxy must not become a second shared boss');
-    assert.equal(levelMap?.has(memberLocalBossId), false, 'member proxy must not become a second shared boss');
-    assert.equal(packetCount(member, 0x08), 0, 'leader local boss must not be broadcast as an inert duplicate');
-    assert.equal(packetCount(leader, 0x08), 0, 'member local boss must not be broadcast as an inert duplicate');
+    assert.deepEqual(TutorialDungeonMechanics.noteBossIntroStarted(a as never, 3923550, 'Tag Ugo'), ['boss_intro_started']);
+    const boss = { id: 3923550, canonicalId: 3923550, name: 'GoblinBoss1', hp: 790, maxHp: 1000 };
+    TutorialDungeonMechanics.noteBossHealth(a as never, boss);
+    boss.hp = 490;
+    TutorialDungeonMechanics.noteBossHealth(b as never, boss);
+    assert.equal(latestSnapshot(a).boss.currentHp, 490);
+    assert.equal(latestSnapshot(b).boss.currentHp, 490);
+    assert.equal(latestSnapshot(a).boss.wave80, true);
+    assert.equal(latestSnapshot(a).boss.wave50, true);
+
+    const dead = TutorialDungeonMechanics.markBossDead(a as never, revision(a));
+    assert.equal(dead.status, 'applied');
+    assert.equal(TutorialDungeonMechanics.noteRewardsGranted(a as never, { id: 3923550 }).status, 'applied');
+    const rewardRevision = revision(a);
+    assert.equal(TutorialDungeonMechanics.markBossDead(b as never, revision(b)).status, 'already_completed');
+    assert.equal(TutorialDungeonMechanics.noteRewardsGranted(b as never, { id: 3923550 }).status, 'already_completed');
+    assert.equal(revision(a), rewardRevision);
+
+    setRoom(a, 11, 22721, 2959);
+    assert.equal(TutorialDungeonMechanics.breakChain(a as never, 4054622, revision(a)).status, 'applied');
+    assert.equal(progress(a), 100);
+    assert.equal(TutorialDungeonMechanics.getClientState(a as never)?.dungeonCompleted, true);
+
+    setRoom(a, 11, 22832, 2959);
+    setRoom(b, 11, 22832, 2959);
+    assert.equal(TutorialDungeonMechanics.openChest(a as never, 3989086, revision(a)).status, 'applied');
+    assert.equal(TutorialDungeonMechanics.noteRewardsGranted(a as never, { id: 3989086 }).status, 'applied');
+    const bossChestRewardRevision = revision(a);
+    assert.equal(TutorialDungeonMechanics.openChest(b as never, 3989086, revision(b)).status, 'already_completed');
+    assert.equal(TutorialDungeonMechanics.noteRewardsGranted(b as never, { id: 3989086 }).status, 'already_completed');
+    assert.equal(revision(a), bossChestRewardRevision);
+
+    register(late);
+    TutorialDungeonMechanics.sendSnapshot(late as never, 'boss_late_join');
+    const snapshot = latestSnapshot(late);
+    assert.equal(snapshot.boss.dead, true);
+    assert.equal(snapshot.boss.spawned, false);
+    assert.equal(snapshot.boss.rewardsGranted, true);
+    assert.equal(snapshot.chests['3989086'].opened, true);
+    assert.equal(snapshot.chests['3989086'].rewardsGranted, true);
+    assert.equal(snapshot.dungeonCompleted, true);
 }
 
-async function testBossDefeatWaitsForAnnaChain(): Promise<void> {
-    const client = createFakeClient('KidnapperRunner', 61001);
-    resetFor(client);
-    GlobalState.sessionsByToken.set(client.token, client as never);
-
-    await MissionHandler.handleForcedDungeonBossCompletion(client as never, bossEntity());
-
-    const state = TutorialDungeonMechanics.getClientState(client as never);
-    assert.equal(state?.bossDefeated, true, 'Tag Ugo should be recorded as defeated');
-    assert.equal(state?.annaFreed, false, 'Anna rescue should still be incomplete');
-    assert.equal(client.pendingDungeonCompletionScope, '', 'boss defeat alone must not schedule completion');
-    assert.equal(packetCount(client, 0x87), 0, 'boss defeat alone must not emit rank result');
+function testRevisionRulesAndSnapshotReconstruction(): void {
+    const a = createFakeClient('RevisionA', 61501, 'revision-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a);
+    TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a));
+    const current = TutorialDungeonMechanics.buildSnapshot(scope)!;
+    const clientState: TutorialDungeonClientSnapshotState = { scope: '', revision: -1, snapshot: null };
+    assert.deepEqual(applyTutorialDungeonSnapshotClientState(clientState, current), { status: 'applied', requestResync: false });
+    assert.deepEqual(applyTutorialDungeonSnapshotClientState(clientState, current), { status: 'equal', requestResync: false });
+    const stale = { ...current, revision: current.revision - 1 };
+    assert.deepEqual(applyTutorialDungeonSnapshotClientState(clientState, stale), { status: 'stale', requestResync: false });
+    const gap = JSON.parse(JSON.stringify(current)) as TutorialDungeonSnapshot;
+    gap.revision = current.revision + 3;
+    gap.progress = 28;
+    gap.dummies['4841054'].completed = true;
+    assert.deepEqual(applyTutorialDungeonSnapshotClientState(clientState, gap), { status: 'applied', requestResync: true });
+    assert.equal(clientState.snapshot?.chains['3268190'].broken, true);
+    assert.equal(clientState.snapshot?.dummies['4841054'].completed, true);
+    assert.equal(clientState.snapshot?.progress, 28);
 }
 
-async function testAnnaChainCompletesAfterBoss(): Promise<void> {
-    const client = createFakeClient('AnnaRescuer', 61002);
-    resetFor(client);
-    GlobalState.sessionsByToken.set(client.token, client as never);
-
-    const scope = getClientLevelScope(client as never);
-    await MissionHandler.handleForcedDungeonBossCompletion(client as never, bossEntity());
-    MissionHandler.noteDungeonCutsceneStart(client as never, 11);
-    await MissionHandler.handleForcedDungeonObjectiveCompletion(client as never, annaChainEntity());
-
-    assert.equal(client.pendingDungeonCompletionScope, '', 'completion must wait in the shared state, not a client timer');
-    DungeonCompletionSystem.noteClientCompletionSignal(
-        scope,
-        DungeonCompletionSystem.getParticipantKey(client as never),
-        100
-    );
-    const beforeCutsceneEnd = DungeonCompletionSystem.evaluate(scope);
-    assert.equal(beforeCutsceneEnd.ready, false, 'client completion signal must not bypass the active end cutscene');
-    assert.equal(beforeCutsceneEnd.reason, 'cutscene_gate_pending');
-    assert.equal(packetCount(client, 0x87), 0, 'rank result must remain hidden until the end cutscene finishes');
-
-    MissionHandler.noteDungeonCutsceneEnd(client as never, 11);
-    await sleep(5);
-
-    assert.equal(DungeonCompletionSystem.evaluate(scope).objectivesMet, true);
-    assert.equal(packetCount(client, 0x87), 1, 'final rescue should emit one rank result');
-
-    await MissionHandler.handleForcedDungeonObjectiveCompletion(client as never, annaChainEntity());
-    await sleep(5);
-    assert.equal(packetCount(client, 0x87), 1, 'duplicate chain defeat should not emit duplicate rank result');
+function testInstanceIsolationAndScopeFilteredBroadcast(): void {
+    const a = createFakeClient('PartyOne', 61601, 'party-one');
+    const b = createFakeClient('PartyTwo', 61602, 'party-two');
+    const scopeA = getClientLevelScope(a as never);
+    const scopeB = getClientLevelScope(b as never);
+    clearHarness(scopeA, scopeB);
+    register(a, b);
+    const bPacketsBefore = b.sentPackets.length;
+    TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a));
+    assert.equal(TutorialDungeonMechanics.getClientState(a as never)?.chains.get('3268190')?.broken, true);
+    assert.equal(TutorialDungeonMechanics.getClientState(b as never)?.chains.get('3268190')?.broken, false);
+    assert.equal(TutorialDungeonMechanics.getClientState(b as never)?.progress, 11);
+    assert.equal(b.sentPackets.length, bPacketsBefore, 'other instance must receive no broadcast');
 }
 
-function testScriptedObjectiveStateIsIdempotent(): void {
-    const client = createFakeClient('ScriptedState', 61003);
-    resetFor(client);
+function testDisconnectReconnectPreservesActiveScope(): void {
+    const a = createFakeClient('ReconnectA', 61701, 'reconnect-scope');
+    const b = createFakeClient('ReconnectB', 61702, 'reconnect-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a, b);
+    TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a));
+    GlobalState.sessionsByToken.delete(a.token);
+    setRoom(b, 2, 4000, 2099);
+    TutorialDungeonMechanics.completeDummy(b as never, 4841054, revision(b));
 
-    let events = TutorialDungeonMechanics.noteEntityDefeated(client as never, entity(3268190, 'Chains02'));
-    assert.deepEqual(events, ['early_chain_broken']);
-    events = TutorialDungeonMechanics.noteEntityDefeated(client as never, entity(3268190, 'Chains02'));
-    assert.deepEqual(events, [], 'chain state should be idempotent by entity id');
-
-    TutorialDungeonMechanics.noteEntityDefeated(client as never, entity(4841054, 'IntroDummy1'));
-    TutorialDungeonMechanics.noteEntityDefeated(client as never, entity(4906590, 'IntroDummy2'));
-    TutorialDungeonMechanics.noteEntityDefeated(client as never, entity(4972126, 'IntroDummy3'));
-    TutorialDungeonMechanics.noteEntityDefeated(client as never, entity(3989086, 'TreasureChestEmpty'));
-
-    const state = TutorialDungeonMechanics.getClientState(client as never);
-    assert.equal(state?.dummyOneDefeated, true);
-    assert.equal(state?.dummyTwoDefeated, true);
-    assert.equal(state?.dummyThreeDefeated, true);
-    assert.equal(state?.bossChestOpened, true);
+    const reconnected = createFakeClient('ReconnectA', 61703, 'reconnect-scope');
+    register(reconnected);
+    TutorialDungeonMechanics.sendSnapshot(reconnected as never, 'reconnect');
+    const snapshot = latestSnapshot(reconnected);
+    assert.equal(snapshot.scope, scope);
+    assert.equal(snapshot.chains['3268190'].broken, true);
+    assert.equal(snapshot.dummies['4841054'].completed, true);
+    assert.equal(snapshot.progress, 21);
 }
 
-function testBossIntroAndThresholdsAreServerTracked(): void {
-    const client = createFakeClient('BossIntro', 61004);
-    resetFor(client);
-    GlobalState.sessionsByToken.set(client.token, client as never);
-
-    LevelHandler.handleRoomBossInfo(
-        client as never,
-        buildRoomBossInfoPayload(11, TutorialDungeonMechanics.TAG_UGO_BOSS_ID, 'Tag Ugo')
-    );
-    TutorialDungeonMechanics.noteBossHealth(client as never, bossEntity(790, 1000));
-    TutorialDungeonMechanics.noteBossHealth(client as never, bossEntity(490, 1000));
-    TutorialDungeonMechanics.noteBossHealth(client as never, bossEntity(320, 1000));
-    TutorialDungeonMechanics.noteBossHealth(client as never, bossEntity(300, 1000));
-
-    const state = TutorialDungeonMechanics.getClientState(client as never);
-    assert.equal(state?.bossIntroStarted, true);
-    assert.equal(state?.bossWave80, true);
-    assert.equal(state?.bossWave50, true);
-    assert.equal(state?.bossWave33, true);
-    assert.equal(state?.events.filter((event) => event === 'boss_wave_33').length, 1);
+function testValidationAndResyncResult(): void {
+    const a = createFakeClient('ValidationA', 61801, 'validation-scope');
+    const scope = getClientLevelScope(a as never);
+    clearHarness(scope);
+    register(a);
+    setRoom(a, 2, 4000, 2099);
+    assert.equal(TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a)).reason, 'wrong_room');
+    setRoom(a, 1, 9999, 9999);
+    assert.equal(TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a)).reason, 'interaction_out_of_range');
+    setRoom(a, 1, 1327, 1880);
+    assert.equal(TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a) + 1).reason, 'future_revision');
+    assert.equal(TutorialDungeonMechanics.breakChain(a as never, 3268190, revision(a)).status, 'applied');
+    setRoom(a, 2, 4000, 2099);
+    const stale = TutorialDungeonMechanics.completeDummy(a as never, 4841054, 0);
+    assert.equal(stale.status, 'requires_resync');
+    assert.equal(stale.reason, 'stale_revision');
+    assert.ok(a.sentPackets.some((packet) => packet.id === GOBLIN_KIDNAPPERS_SNAPSHOT_PACKET_ID));
+    assert.equal(TutorialDungeonMechanics.completeDummy(a as never, 'dummy:not-an-id', revision(a)).reason, 'invalid_stable_entity_key');
 }
 
-async function main(): Promise<void> {
+function main(): void {
     ensureDataLoaded();
-    testOnlyTagUgoIsServerSpawned();
-    testPartyBossUsesOneSharedCanonicalWithoutVisibleServerDuplicate();
-    testPartyLeaderSideEnemiesRemainClientPrivate();
-    await testBossDefeatWaitsForAnnaChain();
-    await testAnnaChainCompletesAfterBoss();
-    testScriptedObjectiveStateIsIdempotent();
-    testBossIntroAndThresholdsAreServerTracked();
+    testStableCatalogAndInternalIdentity();
+    testChainLateJoinAndDuplicate();
+    testDummyBroadcastAndLateJoin();
+    testChestRewardsOnce();
+    testCutsceneLogicalStateAndLocalPresentation();
+    testValidatedLogicalObjectiveRequests();
+    testRoomCheckpointAndParrotState();
+    testBossHpDeathRewardsAndCompletionOnce();
+    testRevisionRulesAndSnapshotReconstruction();
+    testInstanceIsolationAndScopeFilteredBroadcast();
+    testDisconnectReconnectPreservesActiveScope();
+    testValidationAndResyncResult();
+    GlobalState.sessionsByToken.clear();
     console.log('goblin_kidnappers_server_authority_regression: ok');
 }
 
-void main().catch((error) => {
+try {
+    main();
+} catch (error) {
     console.error(error);
-    process.exit(1);
-});
+    process.exitCode = 1;
+}

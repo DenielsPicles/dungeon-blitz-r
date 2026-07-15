@@ -16,6 +16,7 @@ import { areClientsInSameParty, getPartyIdForClient, isClientPartyLeader, shares
 import { areClientsInSameLevelScope, getClientLevelScope, getLevelScopeKey, getScopeLevelName } from '../core/LevelScope';
 import { getPartyRuntimeLevelForClient } from '../core/RuntimeLevel';
 import { markRoomBossEntity } from '../core/RoomBossState';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
 
 export class EntityHandler {
     private static readonly CLIENT_SPAWN_LEVELS = new Set<string>([
@@ -377,7 +378,15 @@ export class EntityHandler {
 
         for (const npc of NpcLoader.getNpcsForLevel(levelName)) {
             const npcId = Math.max(0, Math.round(Number(npc.id ?? 0)));
-            if (npcId <= 0 || destroyedIds.has(npcId) || levelMap.has(npcId)) {
+            if (
+                npcId <= 0 ||
+                destroyedIds.has(npcId) ||
+                levelMap.has(npcId) ||
+                (
+                    TutorialDungeonMechanics.isTutorialDungeon(levelName) &&
+                    TutorialDungeonMechanics.getState(levelScope)?.defeatedEntityIds.has(npcId)
+                )
+            ) {
                 continue;
             }
 
@@ -1335,6 +1344,16 @@ export class EntityHandler {
 
         const levelScope = getLevelScopeKey(levelName, client.levelInstanceId);
         if (!levelScope || EntityHandler.hasOtherActiveSessionInScope(client, levelScope)) {
+            return;
+        }
+
+        // A reconnect to a progressed Goblin Kidnappers scope is not a fresh
+        // run merely because every socket was briefly absent. Its revisioned
+        // instance state remains authoritative until explicit abandonment.
+        const tutorialState = TutorialDungeonMechanics.isTutorialDungeon(levelName)
+            ? TutorialDungeonMechanics.getState(levelScope)
+            : null;
+        if (tutorialState && tutorialState.revision > 0) {
             return;
         }
 

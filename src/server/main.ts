@@ -40,6 +40,7 @@ import { PetHandler } from './handlers/PetHandler';
 import { discordSocialBridge } from './integrations/DiscordSocialBridge';
 import { ProjectInfo } from './core/ProjectInfo';
 import { JsonAdapter } from './database/JsonAdapter';
+import { TutorialDungeonMechanics } from './core/TutorialDungeonMechanics';
 import * as path from 'path';
 
 import { StaticServer } from './core/StaticServer';
@@ -102,6 +103,7 @@ router.register(0xC8, GearSetHandler.handleRenameGearSet);
 router.register(0x105, LockboxHandler.handleBuyLockboxKeys);
 router.register(0x107, LockboxHandler.handleLockboxReward);
 router.register(0x114, LockboxHandler.handleBuyTreasureTrove);
+router.register(TutorialDungeonMechanics.SNAPSHOT_PACKET_ID, TutorialDungeonMechanics.handleSnapshotControl);
 router.register(0xBD, AbilityHandler.handleActiveAbilitiesUpdate);
 router.register(0xBE, AbilityHandler.handleStartAbilityResearch);
 router.register(0x41, LevelHandler.handleRequestDoorState);
