@@ -52,6 +52,8 @@ export class EntityHandler {
         'GoblinRiverDungeonHard'
     ]);
     private static readonly SERVER_AUTHORITY_HOSTILE_LEVELS = new Set<string>([
+        'TutorialDungeon',
+        'TutorialDungeonHard',
         'AC_Mission1',
         'JC_Mini1Hard',
         'JC_Mini2'

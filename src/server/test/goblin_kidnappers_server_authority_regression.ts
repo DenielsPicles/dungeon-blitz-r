@@ -285,6 +285,7 @@ function testPartyLeaderSideEnemiesRemainClientPrivate(): void {
 
 function testOnlyTagUgoIsServerSpawned(): void {
     for (const levelName of ['TutorialDungeon', 'TutorialDungeonHard']) {
+        assert.equal(EntityHandler.usesServerAuthorityHostiles(levelName), true);
         const serverNpcs = NpcLoader.getNpcsForLevel(levelName);
         assert.equal(serverNpcs.length, 1, `${levelName} should retain exactly one server-spawned entity`);
         assert.equal(serverNpcs[0].id, TutorialDungeonMechanics.TAG_UGO_BOSS_ID);
@@ -293,6 +294,60 @@ function testOnlyTagUgoIsServerSpawned(): void {
         assert.equal(serverNpcs[0].boss, true);
         assert.equal(serverNpcs[0].serverOnlyObjective, false);
     }
+}
+
+function testPartyBossUsesOneSharedCanonicalWithoutVisibleServerDuplicate(): void {
+    const leader = createFakeClient('BossLeader', 61008);
+    const member = createFakeClient('BossMember', 61009);
+    resetFor(leader);
+    member.levelInstanceId = leader.levelInstanceId;
+    GlobalState.sessionsByToken.set(leader.token, leader as never);
+    GlobalState.sessionsByToken.set(member.token, member as never);
+    GlobalState.partyGroups.set(901, {
+        id: 901,
+        leader: leader.character.name,
+        members: [leader.character.name, member.character.name],
+        locked: false
+    });
+    GlobalState.partyByMember.set('bossleader', 901);
+    GlobalState.partyByMember.set('bossmember', 901);
+
+    EntityHandler.sendInitialLevelEntities(leader as never, leader.currentLevel);
+    EntityHandler.sendInitialLevelEntities(member as never, member.currentLevel);
+
+    const scope = getClientLevelScope(leader as never);
+    const levelMap = GlobalState.levelEntities.get(scope);
+    assert.ok(levelMap?.has(TutorialDungeonMechanics.TAG_UGO_BOSS_ID), 'shared scope should contain canonical Tag Ugo');
+    assert.equal(packetCount(leader, 0x0F), 0, 'leader must not receive a visible server boss duplicate');
+    assert.equal(packetCount(member, 0x0F), 0, 'member must not receive a visible server boss duplicate');
+
+    leader.sentPackets.length = 0;
+    member.sentPackets.length = 0;
+    const leaderLocalBossId = 7002001;
+    const memberLocalBossId = 7002002;
+    EntityHandler.handleEntityFullUpdate(
+        leader as never,
+        buildHostileFullUpdate(leaderLocalBossId, 'GoblinBoss1', 2)
+    );
+    EntityHandler.handleEntityFullUpdate(
+        member as never,
+        buildHostileFullUpdate(memberLocalBossId, 'GoblinBoss1', 2)
+    );
+
+    assert.equal(
+        EntityHandler.resolveEntityAlias(leader as never, leaderLocalBossId),
+        TutorialDungeonMechanics.TAG_UGO_BOSS_ID,
+        'leader local boss should proxy the shared canonical Tag Ugo'
+    );
+    assert.equal(
+        EntityHandler.resolveEntityAlias(member as never, memberLocalBossId),
+        TutorialDungeonMechanics.TAG_UGO_BOSS_ID,
+        'member local boss should proxy the same shared canonical Tag Ugo'
+    );
+    assert.equal(levelMap?.has(leaderLocalBossId), false, 'leader proxy must not become a second shared boss');
+    assert.equal(levelMap?.has(memberLocalBossId), false, 'member proxy must not become a second shared boss');
+    assert.equal(packetCount(member, 0x08), 0, 'leader local boss must not be broadcast as an inert duplicate');
+    assert.equal(packetCount(leader, 0x08), 0, 'member local boss must not be broadcast as an inert duplicate');
 }
 
 async function testBossDefeatWaitsForAnnaChain(): Promise<void> {
@@ -387,6 +442,7 @@ function testBossIntroAndThresholdsAreServerTracked(): void {
 async function main(): Promise<void> {
     ensureDataLoaded();
     testOnlyTagUgoIsServerSpawned();
+    testPartyBossUsesOneSharedCanonicalWithoutVisibleServerDuplicate();
     testPartyLeaderSideEnemiesRemainClientPrivate();
     await testBossDefeatWaitsForAnnaChain();
     await testAnnaChainCompletesAfterBoss();
