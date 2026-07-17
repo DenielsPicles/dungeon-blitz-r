@@ -11,7 +11,6 @@ import { CommandHandler } from './handlers/CommandHandler';
 import { LevelHandler } from './handlers/LevelHandler';
 import { SocialHandler } from './handlers/SocialHandler';
 import { LevelConfig } from './core/LevelConfig';
-import { DungeonCompletionConditions } from './core/DungeonCompletionConditions';
 import { CharacterTemplates } from './core/CharacterTemplates';
 import { PetConfig } from './core/PetConfig';
 import { TalentHandler } from './handlers/TalentHandler';
@@ -34,15 +33,45 @@ import { LootDepthRewardHandler } from './handlers/LootDepthRewardHandler';
 import { EquipmentHandler } from './handlers/EquipmentHandler';
 import { GearSetHandler } from './handlers/GearSetHandler';
 import { AbilityHandler } from './handlers/AbilityHandler';
+import { DebugLogger } from './core/Debug';
 import { GuildHandler } from './handlers/GuildHandler';
 import { ForgeHandler } from './handlers/ForgeHandler';
 import { PetHandler } from './handlers/PetHandler';
 import { discordSocialBridge } from './integrations/DiscordSocialBridge';
 import { ProjectInfo } from './core/ProjectInfo';
-import { JsonAdapter } from './database/JsonAdapter';
 import * as path from 'path';
 
 import { StaticServer } from './core/StaticServer';
+
+type DungeonCompletionPatchTarget = {
+    DUNGEONS_REQUIRING_BOSS_DEFEAT?: Set<string>;
+    REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL?: Record<string, ReadonlySet<string>>;
+    DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE?: Set<string>;
+};
+
+function applyDungeonCompletionPatches(): void {
+    const missionHandler = MissionHandler as unknown as DungeonCompletionPatchTarget;
+
+    missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('SRN_Mission3');
+    missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('SRN_Mission3Hard');
+    missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('GhostBossDungeon');
+    missionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT?.add('GhostBossDungeonHard');
+
+    missionHandler.DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE?.add('GhostBossDungeon');
+    missionHandler.DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE?.add('GhostBossDungeonHard');
+
+    const requiredBossNames = missionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL;
+    if (!requiredBossNames) {
+        return;
+    }
+
+    requiredBossNames.SRN_Mission3 = new Set(['YoungDragonGreen']);
+    requiredBossNames.SRN_Mission3Hard = new Set(['YoungDragonGreenHard']);
+    requiredBossNames.GhostBossDungeon = new Set(['NephitLargeEye']);
+    requiredBossNames.GhostBossDungeonHard = new Set(['NephitLargeEyeHard']);
+}
+
+applyDungeonCompletionPatches();
 
 // Load Config
 const dataDir = path.join(Config.DATA_DIR, 'data');
@@ -55,17 +84,8 @@ MissionDialogueLoader.load(dataDir);
 NpcDialogueLoader.load(dataDir);
 DialogueTranslationLoader.load(dataDir);
 NpcLoader.load(dataDir);
-const dungeonCompletionConfigErrors = DungeonCompletionConditions.validate(LevelConfig.getDungeonLevelNames());
-if (dungeonCompletionConfigErrors.length) {
-    throw new Error(
-        `[DungeonCompletion] Invalid condition catalog:\n${dungeonCompletionConfigErrors.map((error) => `- ${error}`).join('\n')}`
-    );
-}
-console.log(
-    `[DungeonCompletion] Loaded ${DungeonCompletionConditions.getConfiguredLevelNames().length} conditions for ` +
-    `${LevelConfig.getDungeonLevelNames().length} runtime dungeons.`
-);
 console.log(`[Startup] ${ProjectInfo.name} v${ProjectInfo.version}`);
+DebugLogger.logStartup();
 discordSocialBridge.initialize();
 
 // Initialize Router
@@ -212,66 +232,18 @@ router.register(0xF0, PetHandler.handlePetSpeedUp);
 router.register(0x106, SigilHandler.handleRoyalSigilStorePurchase);
 
 let policyServer: PolicyServer | null = null;
+if (Config.ENABLE_POLICY_SERVER) {
+    policyServer = new PolicyServer(Config.POLICY_PORT, Config.BIND_HOST);
+    policyServer.start();
+} else {
+    console.log(
+        `[Policy] Dedicated policy server disabled; serving socket policy inline on ${Config.BIND_HOST}:${Config.PORTS[0]}`
+    );
+}
+
 const staticServer = new StaticServer(Config.STATIC_PORT, '../client/content/localhost', Config.BIND_HOST);
+staticServer.start();
+
 const gameServer = new GameServer(Config.PORTS[0], router, Config.BIND_HOST);
-
-async function startServers(): Promise<void> {
-    await JsonAdapter.initializeMongoGameData();
-
-    if (Config.ENABLE_POLICY_SERVER) {
-        policyServer = new PolicyServer(Config.POLICY_PORT, Config.BIND_HOST);
-        policyServer.start();
-    } else {
-        console.log(
-            `[Policy] Dedicated policy server disabled; serving socket policy inline on ${Config.BIND_HOST}:${Config.PORTS[0]}`
-        );
-    }
-
-    staticServer.start();
-    AILogic.start();
-    gameServer.start();
-}
-
-void startServers().catch((error) => {
-    console.error('[Mongo] Persistence startup failed; refusing to start with unsafe data authority:', error);
-    process.exit(1);
-});
-
-let isShuttingDown = false;
-
-function shutdown(signal: string, exitCode: number, onComplete?: () => void): void {
-    if (isShuttingDown) {
-        return;
-    }
-
-    isShuttingDown = true;
-    console.log(`[System] Received ${signal}; shutting down servers.`);
-
-    const tasks = [
-        staticServer.stop(),
-        gameServer.stop(),
-        policyServer?.stop() ?? Promise.resolve(),
-        JsonAdapter.closeMongoGameData()
-    ];
-
-    void Promise.allSettled(tasks).then((results) => {
-        for (const result of results) {
-            if (result.status === 'rejected') {
-                console.error('[System] Shutdown error:', result.reason);
-            }
-        }
-
-        if (onComplete) {
-            onComplete();
-            return;
-        }
-
-        process.exit(exitCode);
-    });
-}
-
-process.once('SIGINT', () => shutdown('SIGINT', 0));
-process.once('SIGTERM', () => shutdown('SIGTERM', 0));
-process.once('SIGBREAK', () => shutdown('SIGBREAK', 0));
-process.once('SIGHUP', () => shutdown('SIGHUP', 0));
-process.once('SIGUSR2', () => shutdown('SIGUSR2', 0, () => process.kill(process.pid, 'SIGUSR2')));
+AILogic.start();
+gameServer.start();

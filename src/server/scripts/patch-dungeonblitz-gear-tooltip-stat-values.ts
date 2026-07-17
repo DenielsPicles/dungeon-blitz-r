@@ -22,12 +22,9 @@ const DEFAULT_SWF = path.resolve(
   "DungeonBlitz.swf",
 );
 
-export type TooltipStatMode = "original" | "applied";
-
-function parseArgs(argv: string[]): { swfPath: string; verify: boolean; mode: TooltipStatMode } {
+function parseArgs(argv: string[]): { swfPath: string; verify: boolean } {
   let swfPath = DEFAULT_SWF;
   let verify = false;
-  let mode: TooltipStatMode = "original";
 
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -39,32 +36,13 @@ function parseArgs(argv: string[]): { swfPath: string; verify: boolean; mode: To
       verify = true;
       continue;
     }
-    if (arg === "--mode") {
-      const value = argv[++index];
-      if (value !== "original" && value !== "applied") {
-        throw new Error(`Unknown mode: ${value}`);
-      }
-      mode = value;
-      continue;
-    }
-    if (arg === "--original") {
-      mode = "original";
-      continue;
-    }
-    if (arg === "--applied") {
-      mode = "applied";
-      continue;
-    }
     if (arg === "--help" || arg === "-h") {
       console.log([
         "Usage:",
-        "  npx ts-node src/server/scripts/patch-dungeonblitz-gear-tooltip-stat-values.ts [--verify] [--mode original|applied] [--swf <path>]",
+        "  npx ts-node src/server/scripts/patch-dungeonblitz-gear-tooltip-stat-values.ts [--verify] [--swf <path>]",
         "",
-        "Patches GearType.method_121 gear tooltip stat display.",
-        "",
-        "Modes:",
-        "  original  Restore the original client formula that subtracts baseline stats.",
-        "  applied   Show the full Attack, Expertise, and Defense values applied to character statistics.",
+        "Patches GearType.method_121 so gear tooltips show the same Attack, Expertise,",
+        "and Defense values that are applied to character statistics.",
       ].join("\n"));
       process.exit(0);
     }
@@ -72,7 +50,7 @@ function parseArgs(argv: string[]): { swfPath: string; verify: boolean; mode: To
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  return { swfPath, verify, mode };
+  return { swfPath, verify };
 }
 
 function localIndex(inst: Instruction | undefined): number | null {
@@ -126,7 +104,7 @@ function findTooltipSubtract(instructions: Instruction[]): number | null {
   return null;
 }
 
-function findDirectTooltipReturn(instructions: Instruction[]): number | null {
+function hasDirectTooltipReturn(instructions: Instruction[]): boolean {
   for (let index = 0; index < instructions.length - 3; index += 1) {
     if (
       localIndex(instructions[index]) === 7 &&
@@ -135,52 +113,22 @@ function findDirectTooltipReturn(instructions: Instruction[]): number | null {
       instructions[index + 3].opcode === 0x02 &&
       instructions[index + 4]?.opcode === 0x48
     ) {
-      return index + 1;
+      return true;
     }
   }
-  return null;
+  return false;
 }
 
-export function patchSwf(swfPath: string, verify: boolean, mode: TooltipStatMode): void {
+function patchSwf(swfPath: string, verify: boolean): void {
   const { ctx, methodBody, instructions } = getGearTypeMethod121(swfPath);
   const subtractIndex = findTooltipSubtract(instructions);
-  const directReturnIndex = findDirectTooltipReturn(instructions);
+  const alreadyPatched = hasDirectTooltipReturn(instructions);
 
-  if (mode === "original") {
-    if (subtractIndex !== null) {
-      console.log(`${swfPath}: already original (gear tooltips subtract baseline stat values).`);
-      return;
-    }
-    if (directReturnIndex === null) {
-      throw new Error("Could not find GearType.method_121 applied tooltip bytecode.");
-    }
-
-    if (verify) {
-      throw new Error(`${swfPath}: verify failed; gear tooltips still show applied stat values.`);
-    }
-
-    const dup = instructions[directReturnIndex];
-    const pop = instructions[directReturnIndex + 1];
-    const nop = instructions[directReturnIndex + 2];
-    if (dup.size + pop.size + nop.size !== 3) {
-      throw new Error("Unexpected GearType.method_121 applied byte width.");
-    }
-
-    ensureBackup(swfPath);
-    const patchOffset = methodBody.codeStart + dup.offset;
-    ctx.body[patchOffset] = 0x62; // getlocal
-    ctx.body[patchOffset + 1] = 0x08; // local 8: hidden baseline stat value
-    ctx.body[patchOffset + 2] = 0xa1; // subtract
-    writeSwf(ctx, ctx.body, 0);
-    console.log(`${swfPath}: restored original gear tooltip stat values.`);
-    return;
-  }
-
-  if (directReturnIndex !== null) {
+  if (subtractIndex === null) {
+    if (alreadyPatched) {
       console.log(`${swfPath}: already patched (gear tooltips show applied stat values).`);
       return;
-  }
-  if (subtractIndex === null) {
+    }
     throw new Error("Could not find GearType.method_121 tooltip subtraction bytecode.");
   }
 
@@ -203,7 +151,5 @@ export function patchSwf(swfPath: string, verify: boolean, mode: TooltipStatMode
   console.log(`${swfPath}: patched gear tooltip stat values.`);
 }
 
-if (require.main === module) {
-  const { swfPath, verify, mode } = parseArgs(process.argv);
-  patchSwf(swfPath, verify, mode);
-}
+const { swfPath, verify } = parseArgs(process.argv);
+patchSwf(swfPath, verify);

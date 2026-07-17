@@ -50,7 +50,7 @@ function printHelp() {
             '',
             'Defaults:',
             '  exports and patches class_127 in the served DungeonBlitz SWF',
-            '  so /lang, /teleport, and /maintenance commands pass through and social commands send their resolved packet instead of null.'
+            '  so /lang and /teleport commands pass through and social commands send their resolved packet instead of null.'
         ].join('\n')
     );
 }
@@ -145,9 +145,6 @@ function verifyPatchedClass127(source, swfPath) {
     if (!source.includes('return _loc2_ == "/lang:tr" || _loc2_ == "/lang:en" || _loc2_.indexOf("/teleport:") == 0')) {
         throw new Error(`${path.basename(swfPath)} is missing /teleport passthrough support.`);
     }
-    if (!source.includes('_loc2_.indexOf("/maintenance:") == 0')) {
-        throw new Error(`${path.basename(swfPath)} is missing /maintenance passthrough support.`);
-    }
     if (!source.includes('var_1.linkUpdater.WriteChatMessage(param1,param2);')) {
         throw new Error(`${path.basename(swfPath)} is missing the /lang passthrough send path.`);
     }
@@ -159,12 +156,6 @@ function verifyPatchedClass127(source, swfPath) {
     }
     if (!source.includes('var_1.serverConn.SendPacket(_loc7_);')) {
         throw new Error(`${path.basename(swfPath)} is missing social command packet send forwarding.`);
-    }
-    if (!source.includes('_loc3_ += _loc20_;')) {
-        throw new Error(`${path.basename(swfPath)} is missing chat item-link rendering.`);
-    }
-    if (source.includes('_loc3_ += null;')) {
-        throw new Error(`${path.basename(swfPath)} still renders chat item links as null.`);
     }
     const socialCommandBlock = /if\(const_20\[param1\]\)[\s\S]*?\n\s*\}\r?\n\s*else if\(param1 == "TELEPORT"\)/.exec(source)?.[0] ?? '';
     if (!socialCommandBlock) {
@@ -186,7 +177,7 @@ function verifyPublicChatSenderNamePcode(source, swfPath) {
     const requiredPatterns = [
         /pushstring "Unknown"\s+coerce_s\s+setlocal 5/,
         /getproperty QName\(PackageInternalNs\(""\),"entName"\)/,
-        /getlocal 5\s+callproperty (?:Multiname\("FormatHotName"|QName\(PackageNamespace\(""\),"FormatHotName")/
+        /getlocal 5\s+callproperty Multiname\("FormatHotName"/
     ];
 
     for (const pattern of requiredPatterns) {
@@ -199,7 +190,6 @@ function verifyPublicChatSenderNamePcode(source, swfPath) {
 function patchClass127Source(source, swfPath) {
     source = patchPublicChatSenderName(source, swfPath);
     source = patchSocialCommandPackets(source, swfPath);
-    source = patchChatItemLinkRendering(source, swfPath);
 
     const oldReturn = 'return _loc2_ == "/lang:tr" || _loc2_ == "/lang:en" || _loc2_ == "\\\\lang:tr" || _loc2_ == "\\\\lang:en";';
     const newBlock = [
@@ -211,7 +201,7 @@ function patchClass127Source(source, swfPath) {
         '         {',
         '            _loc2_ = "\\\\lang:" + _loc2_.substr(6).split(" ").join("");',
         '         }',
-        '         return _loc2_ == "/lang:tr" || _loc2_ == "/lang:en" || _loc2_.indexOf("/teleport:") == 0 || _loc2_.indexOf("/maintenance:") == 0 || _loc2_ == "\\\\lang:tr" || _loc2_ == "\\\\lang:en" || _loc2_.indexOf("\\\\teleport:") == 0;'
+        '         return _loc2_ == "/lang:tr" || _loc2_ == "/lang:en" || _loc2_.indexOf("/teleport:") == 0 || _loc2_ == "\\\\lang:tr" || _loc2_ == "\\\\lang:en" || _loc2_.indexOf("\\\\teleport:") == 0;'
     ].join('\n');
 
     const helper = [
@@ -233,19 +223,11 @@ function patchClass127Source(source, swfPath) {
         '      '
     ].join('\n');
 
-    const legacyPatchedReturn = 'return _loc2_ == "/lang:tr" || _loc2_ == "/lang:en" || _loc2_.indexOf("/teleport:") == 0 || _loc2_ == "\\\\lang:tr" || _loc2_ == "\\\\lang:en" || _loc2_.indexOf("\\\\teleport:") == 0;';
-    const patchedReturn = 'return _loc2_ == "/lang:tr" || _loc2_ == "/lang:en" || _loc2_.indexOf("/teleport:") == 0 || _loc2_.indexOf("/maintenance:") == 0 || _loc2_ == "\\\\lang:tr" || _loc2_ == "\\\\lang:en" || _loc2_.indexOf("\\\\teleport:") == 0;';
-    if (
-        (source.includes(newBlock) || source.includes(patchedReturn)) &&
-        source.includes('if(this.method_1940(param2))')
-    ) {
+    if (source.includes(newBlock) && source.includes('if(this.method_1940(param2))')) {
         return source;
     }
 
     if (source.includes('private function method_1940(param1:String) : Boolean')) {
-        if (source.includes(legacyPatchedReturn)) {
-            return source.replace(legacyPatchedReturn, patchedReturn);
-        }
         if (!source.includes(oldReturn)) {
             throw new Error(`${path.basename(swfPath)} has an unexpected method_1940 return block.`);
         }
@@ -272,21 +254,6 @@ function patchClass127Source(source, swfPath) {
     }
 
     return source.replace(methodStartPattern, patchedMethodStart);
-}
-
-function patchChatItemLinkRendering(source, swfPath) {
-    const oldRenderPattern = /(var _loc20_:String = _loc19_ \+ "\[" \+ this\.method_1115\(_loc12_,_loc17_,_loc18_\) \+ "\]" \+ var_121;\r?\n\s*)_loc3_ \+= null;/;
-    const newRender = '$1_loc3_ += _loc20_;';
-
-    if (source.includes('_loc3_ += _loc20_;')) {
-        return source;
-    }
-
-    if (!oldRenderPattern.test(source)) {
-        throw new Error(`${path.basename(swfPath)} has an unexpected chat item-link render block.`);
-    }
-
-    return source.replace(oldRenderPattern, newRender);
 }
 
 function patchSocialCommandPackets(source, swfPath) {

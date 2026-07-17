@@ -1,12 +1,11 @@
 import { Client } from '../core/Client';
+import { DebugLogger } from '../core/Debug';
 import {
     buildDefaultDungeonScoreProfile,
     getDungeonScoreProfile,
     getDungeonScoreTotalCap,
     type ResolvedDungeonScoreProfile
 } from '../core/DungeonScoreProfiles';
-import { DungeonCompletionConditions } from '../core/DungeonCompletionConditions';
-import { DungeonCompletionSystem } from '../core/DungeonCompletionSystem';
 import { GameData } from '../core/GameData';
 import { GlobalState } from '../core/GlobalState';
 import { isWolfsEndDungeonLevel } from '../core/WolfsEndDungeonStatsPolicy';
@@ -17,17 +16,21 @@ import {
     noteDungeonRunCompletionProgress
 } from '../core/DungeonRunStats';
 import { buildDungeonRunScoreSummary } from '../core/DungeonRunStats';
-import { EntityState } from '../core/Entity';
+import { EntityState, EntityTeam } from '../core/Entity';
 import { BuildingID } from '../core/Enums';
 import { LevelConfig } from '../core/LevelConfig';
 import { getClientLevelScope, getScopeLevelName } from '../core/LevelScope';
 import {
+    getSharedDungeonProgressTotals,
     getOrCreateSharedDungeonProgressState,
+    hasSharedDungeonProgressHostiles,
+    recomputeSharedDungeonProgress,
+    resolveSharedDungeonProgressAuthorityToken,
     usesSharedDungeonProgress
 } from '../core/SharedDungeonProgress';
-import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
 import { Character } from '../database/Database';
 import { MissionDef, MissionLoader } from '../data/MissionLoader';
+import { NpcLoader } from '../data/NpcLoader';
 import { MissionID } from '../data/runtime';
 import { BitBuffer } from '../network/protocol/bitBuffer';
 import { BitReader } from '../network/protocol/bitReader';
@@ -72,6 +75,14 @@ type CollectibleKillProgressRule = {
     parents?: ReadonlySet<string>;
 };
 
+type DungeonCompletionObjectiveProgress = {
+    bossDefeated: boolean;
+    defeatedBossNames: Set<string>;
+    defeatedBossNameTimes: Map<string, number>;
+    bossRoomId: number;
+    requiredChestDestroyed: boolean;
+};
+
 export class MissionHandler {
     private static readonly MISSION_NOT_STARTED = 0;
     private static readonly MISSION_IN_PROGRESS = 1;
@@ -82,12 +93,191 @@ export class MissionHandler {
     private static readonly ATTACK_OF_OPPORTUNITY_SATELLITE_IDS = new Set([234, 235, 236]);
     private static readonly ATTACK_OF_OPPORTUNITY_HARD_SATELLITE_IDS = new Set([255, 256, 257]);
     static readonly DUNGEON_COMPLETION_SKIT_SETTLE_MS = 1500;
+    private static readonly CLIENT_AUTHORITY_REQUIRED_BOSS_LEVELS = new Set([
+        'AC_Mission5',
+        'AC_Mission5Hard',
+        'JC_Mission1',
+        'JC_Mission1Hard',
+        'SRN_Mission1',
+        'SRN_Mission1Hard'
+    ]);
+    private static readonly CLIENT_AUTHORITY_REQUIRED_BOSS_NAMES = new Set([
+        'AncientDragonBlack',
+        'AncientDragonBlackHard',
+        'AncientDragonSilver',
+        'AncientDragonSilverHard',
+        'ImperialChampion',
+        'ImperialChampionHard',
+        'LizardLord',
+        'LizardLordHard'
+    ]);
     static readonly DUNGEON_COMPLETION_MAX_DEFER_MS = 15000;
     static readonly CRAFT_TOWN_TUTORIAL_COMPLETION_DELAY_MS = 43 * 250;
     private static readonly PRIMED_CONTACT_DIALOGUE_COUNT = -1;
     private static readonly ACHIEVEMENT_MAMMOTH_IDOL_REWARD = 10;
     private static readonly CRAFT_TOWN_REPAIRED_KEEP_RANK = 5;
+    private static readonly CRAFT_TOWN_TUTORIAL_BOSS_NAMES = new Set([
+        'GoblinShamanHood',
+        'IntroGoblinShamanHood'
+    ]);
+    private static readonly FULL_CLEAR_ONLY_DUNGEON_PATTERN = /^CH_MiniMission\d+(Hard)?$/;
+    private static readonly FULL_CLEAR_ONLY_DUNGEON_NAMES = new Set([
+        'JC_Mini1',
+        'JC_Mini1Hard',
+        'JC_Mini2',
+        'JC_Mini2Hard',
+        'OMM_Mission2',
+        'OMM_Mission2Hard',
+        'OMM_Mission5',
+        'OMM_Mission5Hard',
+        'JC_Mission8',
+        'JC_Mission8Hard',
+        'JC_Mission10',
+        'JC_Mission10Hard'
+    ]);
+    private static readonly DUNGEONS_WITH_CLIENT_SCRIPTED_COMPLETION = new Set([
+        'AC_Mission1',
+        'AC_Mission1Hard'
+    ]);
+    private static readonly DUNGEONS_REQUIRING_BOSS_DEFEAT = new Set([
+        'CraftTownTutorial',
+        'AC_Mission6',
+        'AC_Mission6Hard',
+        'BT_Mission1',
+        'BT_Mission1Hard',
+        'AC_Mission2',
+        'AC_Mission2Hard',
+        'AC_Mission5',
+        'AC_Mission5Hard',
+        'CH_Mission1',
+        'CH_Mission1Hard',
+        'JC_Mission1',
+        'JC_Mission1Hard',
+        'JC_Mission2',
+        'JC_Mission2Hard',
+        'JC_Mission3',
+        'JC_Mission3Hard',
+        'JC_Mission9',
+        'JC_Mission9Hard',
+        'SD_Mission3',
+        'SD_Mission3Hard',
+        'SRN_Mission1',
+        'SRN_Mission1Hard',
+        'SRN_Mission4',
+        'SRN_Mission4Hard'
+    ]);
+    private static readonly REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL: Record<string, ReadonlySet<string>> = {
+        CraftTownTutorial: new Set(['GoblinShamanHood']),
+        AC_Mission2: new Set(['DreadLord']),
+        AC_Mission2Hard: new Set(['DreadLordHard']),
+        AC_Mission5: new Set(['AncientDragonBlack', 'AncientDragonSilver']),
+        AC_Mission5Hard: new Set(['AncientDragonBlackHard', 'AncientDragonSilverHard']),
+        AC_Mission6: new Set(['NephitLargeEye']),
+        AC_Mission6Hard: new Set(['NephitLargeEyeHard']),
+        BT_Mission1: new Set(['BanditTwinA', 'BanditTwinB']),
+        BT_Mission1Hard: new Set(['BanditTwinAHard', 'BanditTwinBHard']),
+        GhostBossDungeon: new Set(['NephitLargeEye']),
+        GhostBossDungeonHard: new Set(['NephitLargeEyeHard']),
+        JC_Mission1: new Set(['ImperialChampion']),
+        JC_Mission1Hard: new Set(['ImperialChampionHard']),
+        JC_Mission2: new Set(['GreaterBoneGolem', 'GreaterBoneGolem2']),
+        JC_Mission2Hard: new Set(['GreaterBoneGolemHard', 'GreaterBoneGolem2Hard']),
+        JC_Mission3: new Set(['DefectorMage']),
+        JC_Mission3Hard: new Set(['DefectorMageHard']),
+        JC_Mission9: new Set(['RisenBandit', 'RisenBandit2']),
+        JC_Mission9Hard: new Set(['RisenBanditHard', 'RisenBandit2Hard']),
+        SD_Mission3: new Set(['OutlanderWyrm']),
+        SD_Mission3Hard: new Set(['OutlanderWyrmHard']),
+        SRN_Mission1: new Set(['LizardLord']),
+        SRN_Mission1Hard: new Set(['LizardLordHard']),
+        SRN_Mission4: new Set(['WyrmGreat']),
+        SRN_Mission4Hard: new Set(['WyrmGreatHard'])
+    };
+    private static readonly REQUIRED_DUNGEON_BOSS_NAME_ALIASES_BY_LEVEL: Record<string, ReadonlyMap<string, string>> = {
+        CraftTownTutorial: new Map([
+            ['IntroGoblinShamanHood', 'GoblinShamanHood']
+        ]),
+        GhostBossDungeon: new Map([
+            ['Nephit', 'NephitLargeEye'],
+            ['NephitHard', 'NephitLargeEye'],
+            ['NephitLargeEye', 'NephitLargeEye'],
+            ['NephitLargeEyeHard', 'NephitLargeEye']
+        ]),
+        GhostBossDungeonHard: new Map([
+            ['Nephit', 'NephitLargeEyeHard'],
+            ['NephitHard', 'NephitLargeEyeHard'],
+            ['NephitLargeEye', 'NephitLargeEyeHard'],
+            ['NephitLargeEyeHard', 'NephitLargeEyeHard']
+        ]),
+        JC_Mission3: new Map([
+            ['DefectorMageMarker', 'DefectorMage'],
+            ['Prince Friedrich Hocke', 'DefectorMage'],
+            ['PrinceFriedrichHocke', 'DefectorMage'],
+            ['Prince Fredrich Hocke', 'DefectorMage'],
+            ['PrinceFredrichHocke', 'DefectorMage']
+        ]),
+        JC_Mission3Hard: new Map([
+            ['DefectorMage', 'DefectorMageHard'],
+            ['DefectorMageMarker', 'DefectorMageHard'],
+            ['DefectorMageMarkerHard', 'DefectorMageHard'],
+            ['Prince Friedrich Hocke', 'DefectorMageHard'],
+            ['PrinceFriedrichHocke', 'DefectorMageHard'],
+            ['Prince Fredrich Hocke', 'DefectorMageHard'],
+            ['PrinceFredrichHocke', 'DefectorMageHard']
+        ])
+    };
+    private static readonly DUNGEONS_REQUIRING_BOSS_AND_CHEST = new Set<string>();
+    private static readonly REQUIRED_DUNGEON_CHEST_NAMES_BY_LEVEL: Record<string, ReadonlySet<string>> = {
+        CH_Mission1: new Set(['QuestTreasureChest']),
+        CH_Mission1Hard: new Set(['QuestTreasureChest'])
+    };
+    private static readonly SIMULTANEOUS_REQUIRED_BOSS_DEFEAT_WINDOW_MS = 3000;
+    private static readonly DUNGEONS_REQUIRING_SIMULTANEOUS_BOSS_DEFEAT = new Set([
+        'JC_Mission9',
+        'JC_Mission9Hard'
+    ]);
+    private static readonly DUNGEONS_REQUIRING_EXPLICIT_COMPLETION_CUTSCENE_END = new Set([
+        'JC_Mission9',
+        'JC_Mission9Hard',
+        'GhostBossDungeon',
+        'GhostBossDungeonHard'
+    ]);
+    private static readonly DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE = new Set([
+        'JC_Mission3',
+        'JC_Mission3Hard'
+    ]);
+    private static readonly DUNGEONS_WITH_REQUIRED_BOSS_PROXY_COPIES = new Set([
+        'JC_Mission3',
+        'JC_Mission3Hard'
+    ]);
     private static readonly FLASH_DEFEATED_ENTITY_STATE = 6;
+    private static readonly dungeonCompletionObjectiveProgress = new Map<string, DungeonCompletionObjectiveProgress>();
+    // These boss kills intentionally open a post-death room cutscene before the stats screen.
+    private static readonly DUNGEONS_WITH_POST_DEATH_BOSS_CUTSCENE = new Set([
+        'CraftTownTutorial',
+        'AC_Mission6',
+        'AC_Mission6Hard',
+        'BT_Mission1',
+        'BT_Mission1Hard',
+        'JC_Mission1',
+        'JC_Mission1Hard',
+        'JC_Mission2',
+        'JC_Mission2Hard',
+        'JC_Mission3',
+        'JC_Mission3Hard',
+        'JC_Mission9',
+        'JC_Mission9Hard',
+        'GoblinRiverDungeon',
+        'GoblinRiverDungeonHard',
+        'GhostBossDungeon',
+        'GhostBossDungeonHard',
+        'DreamDragonDungeon',
+        'DreamDragonDungeonHard'
+    ]);
+    private static readonly NEPHIT_QUEST_COMPLETION_LEVELS = new Set([
+        'GhostBossDungeon',
+        'GhostBossDungeonHard'
+    ]);
     private static readonly NEWBIE_ROAD_GOBLIN_KILL_NAMES = new Set([
         'GoblinArmorSword',
         'GoblinBrute',
@@ -779,6 +969,12 @@ export class MissionHandler {
         ) {
             character.questTrackerState = 100;
             didMutate = true;
+            DebugLogger.log('CraftTownTutorial:reentryStateLoaded', JSON.stringify({
+                character: String(character.name ?? ''),
+                currentLevel,
+                missionId: MissionID.ClearYourHouse,
+                questTrackerState: 100
+            }));
         }
 
         if (
@@ -786,6 +982,12 @@ export class MissionHandler {
             MissionHandler.ensureCraftTownKeepRepaired(character)
         ) {
             didMutate = true;
+            DebugLogger.log('CraftTownTutorial:reentryKeepRepairRestored', JSON.stringify({
+                character: String(character.name ?? ''),
+                currentLevel,
+                missionId: MissionID.ClearYourHouse,
+                keepRank: MissionHandler.CRAFT_TOWN_REPAIRED_KEEP_RANK
+            }));
         }
 
         return { didMutate, addedMissionId };
@@ -936,7 +1138,14 @@ export class MissionHandler {
     }
 
     static isFullClearOnlyDungeon(levelName: string | null | undefined): boolean {
-        return DungeonCompletionConditions.isFullClear(levelName);
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(
+            normalizedLevel &&
+            (
+                MissionHandler.FULL_CLEAR_ONLY_DUNGEON_PATTERN.test(normalizedLevel) ||
+                MissionHandler.FULL_CLEAR_ONLY_DUNGEON_NAMES.has(normalizedLevel)
+            )
+        );
     }
 
     static syncFullClearDungeonEntryMissionToClient(client: Client): void {
@@ -981,45 +1190,18 @@ export class MissionHandler {
         if (!levelScope || MissionHandler.hasFinalizedDungeonCompletion(client, levelScope)) {
             return;
         }
-        DungeonCompletionSystem.noteClientCompletionSignal(
-            levelScope,
-            DungeonCompletionSystem.getParticipantKey(client),
-            progress
+
+        MissionHandler.scheduleDungeonCompletion(
+            client,
+            MissionHandler.buildSyntheticLevelCompletePacket(100),
+            {
+                forcedDungeonCompletionScope: levelScope,
+                waitForCutsceneEnd: String(client.activeDungeonCutsceneScope ?? '').trim() === levelScope
+            }
         );
-        if (DungeonCompletionSystem.evaluate(levelScope).ready) {
-            MissionHandler.scheduleDungeonCompletionForScope(levelScope, client);
-        }
     }
 
     static shouldWaitForEnemyKillStateMissionProgress(client: Client, destroyedEntity: any): boolean {
-        if (MissionHandler.hasActiveEnemyKillMissionProgress(client, destroyedEntity)) {
-            return true;
-        }
-
-        const levelScope = getClientLevelScope(client);
-        if (!levelScope || !LevelConfig.isDungeonLevel(getScopeLevelName(levelScope))) {
-            return false;
-        }
-
-        for (const other of GlobalState.sessionsByToken.values()) {
-            if (
-                other === client ||
-                !other.playerSpawned ||
-                !other.character ||
-                getClientLevelScope(other) !== levelScope
-            ) {
-                continue;
-            }
-
-            if (MissionHandler.hasActiveEnemyKillMissionProgress(other, destroyedEntity)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static hasActiveEnemyKillMissionProgress(client: Client, destroyedEntity: any): boolean {
         if (!client.character) {
             return false;
         }
@@ -1063,38 +1245,6 @@ export class MissionHandler {
         }
 
         return false;
-    }
-
-    static async handleEnemyDefeatMissionProgressForScope(
-        client: Client,
-        levelScope: string,
-        destroyedEntity: any
-    ): Promise<void> {
-        if (!levelScope || !LevelConfig.isDungeonLevel(getScopeLevelName(levelScope))) {
-            await MissionHandler.handleEnemyDefeatMissionProgress(client, destroyedEntity);
-            return;
-        }
-
-        const recipients = new Set<Client>();
-        if (client.character && client.playerSpawned && getClientLevelScope(client) === levelScope) {
-            recipients.add(client);
-        }
-        for (const other of GlobalState.sessionsByToken.values()) {
-            if (
-                !other.playerSpawned ||
-                !other.character ||
-                getClientLevelScope(other) !== levelScope
-            ) {
-                continue;
-            }
-            recipients.add(other);
-        }
-
-        await Promise.all(
-            [...recipients].map((recipient) =>
-                MissionHandler.handleEnemyDefeatMissionProgress(recipient, destroyedEntity)
-            )
-        );
     }
 
     static async handleEnemyDefeatMissionProgress(client: Client, destroyedEntity: any): Promise<void> {
@@ -1182,6 +1332,28 @@ export class MissionHandler {
             return;
         }
 
+        const pendingScope = String(client.pendingDungeonCompletionScope ?? '').trim();
+        if (
+            pendingScope &&
+            !client.pendingDungeonCompletionFlushActive &&
+            pendingScope === levelScope
+        ) {
+            client.pendingDungeonCompletionPayload = Buffer.from(data);
+            if (
+                client.pendingDungeonCompletionWaitForCutsceneEnd &&
+                MissionHandler.clientCompletionReleasesPostDeathBossCutscene(currentLevel) &&
+                MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope)
+            ) {
+                client.pendingDungeonCompletionWaitForCutsceneEnd = false;
+                if (String(client.activeDungeonCutsceneScope ?? '').trim() === levelScope) {
+                    client.activeDungeonCutsceneScope = '';
+                    client.activeDungeonCutsceneRoomId = 0;
+                }
+                void MissionHandler.flushPendingDungeonCompletion(client);
+            }
+            return;
+        }
+
         const br = new BitReader(data);
         const completionPercent = br.readMethod9();
         const bonusScoreTotal = br.readMethod9();
@@ -1191,6 +1363,9 @@ export class MissionHandler {
         const remainingKills = br.readMethod9();
         const requiredKills = br.readMethod9();
         const levelWidthScore = br.readMethod9();
+
+        const forceSharedDungeonCompletion = Boolean(levelScope) && client.forcedDungeonCompletionScope === levelScope;
+        const defeatedDungeonBossForcesCompletion = MissionHandler.hasDefeatedDungeonBoss(client, levelScope);
 
         const trackerCompletionPercent = Math.max(
             0,
@@ -1204,26 +1379,36 @@ export class MissionHandler {
         let clearedDungeon =
             effectiveCompletionPercent >= 100 ||
             (requiredKills > 0 && remainingKills <= 0);
-        const completionCondition = DungeonCompletionConditions.get(currentLevel);
-        const participantKey = DungeonCompletionSystem.getParticipantKey(client);
-        if (completionCondition?.mode === 'disabled') {
-            return;
-        }
-        if (completionCondition && levelScope) {
-            if (clearedDungeon) {
-                DungeonCompletionSystem.noteClientCompletionSignal(levelScope, participantKey, 100);
-            }
-            const evaluation = DungeonCompletionSystem.evaluate(levelScope);
-            if (!evaluation.ready) {
-                return;
-            }
-            clearedDungeon = true;
-        } else if (LevelConfig.isDungeonLevel(currentLevel)) {
-            // Runtime validation should make this impossible. Never fall back to trusting
-            // a client packet for an unconfigured dungeon.
-            return;
-        }
-        const serverValidatedDungeonCompletion = Boolean(completionCondition && levelScope && clearedDungeon);
+        const dungeonRequiresSpecificCompletionObjectives = MissionHandler.requiresCompletionBossDefeatForDungeon(currentLevel);
+        const allowCraftTownTutorialClientCompletion =
+            currentLevel === 'CraftTownTutorial' &&
+            Boolean(client.keepTutorialState?.bossDefeated) &&
+            clearedDungeon;
+        const dungeonCompletionObjectivesMet =
+            !dungeonRequiresSpecificCompletionObjectives ||
+            MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope);
+        const forceSharedDungeonCompletionAllowed =
+            forceSharedDungeonCompletion &&
+            MissionHandler.canHonorForcedDungeonCompletion(
+                client,
+                currentLevel,
+                levelScope,
+                client.pendingDungeonCompletionFlushActive
+            );
+        const serverValidatedDungeonCompletion =
+            forceSharedDungeonCompletionAllowed ||
+            allowCraftTownTutorialClientCompletion ||
+            (defeatedDungeonBossForcesCompletion && dungeonCompletionObjectivesMet);
+        MissionHandler.logNephitQuestCompletion('completionPacketReceived', client, {
+            levelScope,
+            completionPercent,
+            trackerCompletionPercent,
+            forceSharedDungeonCompletion,
+            forceSharedDungeonCompletionAllowed,
+            defeatedDungeonBossForcesCompletion,
+            dungeonCompletionObjectivesMet,
+            serverValidatedDungeonCompletion
+        });
         if (
             serverValidatedDungeonCompletion &&
             trackerCompletionPercent > 0 &&
@@ -1232,18 +1417,120 @@ export class MissionHandler {
             scoringCompletionPercent = trackerCompletionPercent;
         }
 
+        if (usesSharedDungeonProgress(currentLevel) && levelScope) {
+            const sharedState = serverValidatedDungeonCompletion
+                ? getOrCreateSharedDungeonProgressState(levelScope)
+                : recomputeSharedDungeonProgress(levelScope) ?? getOrCreateSharedDungeonProgressState(levelScope);
+            if (sharedState) {
+                if (!serverValidatedDungeonCompletion && sharedState.progress < 100) {
+                    if (allowCraftTownTutorialClientCompletion) {
+                        sharedState.progress = 100;
+                        effectiveCompletionPercent = 100;
+                        client.character.questTrackerState = 100;
+                        MissionHandler.broadcastSharedDungeonQuestProgress(levelScope, 100);
+                    } else {
+                        if (!hasSharedDungeonProgressHostiles(levelScope)) {
+                            return;
+                        }
+                        return;
+                    }
+                }
+
+                if (serverValidatedDungeonCompletion) {
+                    sharedState.progress = 100;
+                    effectiveCompletionPercent = 100;
+                    client.character.questTrackerState = 100;
+                    MissionHandler.broadcastSharedDungeonQuestProgress(levelScope, 100);
+                } else {
+                    effectiveCompletionPercent = Math.max(effectiveCompletionPercent, Number(sharedState.progress ?? 0));
+                    scoringCompletionPercent = effectiveCompletionPercent;
+                }
+                noteDungeonRunCompletionProgress(client, effectiveCompletionPercent);
+                clearedDungeon =
+                    serverValidatedDungeonCompletion ||
+                    effectiveCompletionPercent >= 100 ||
+                    (requiredKills > 0 && remainingKills <= 0);
+
+                const liveAuthorityToken = resolveSharedDungeonProgressAuthorityToken(levelScope);
+                if (liveAuthorityToken > 0) {
+                    sharedState.authorityToken = liveAuthorityToken;
+                }
+
+                if (!forceSharedDungeonCompletion && sharedState.authorityToken > 0 && client.token !== sharedState.authorityToken) {
+                    return;
+                }
+            }
+        }
         if (serverValidatedDungeonCompletion) {
             effectiveCompletionPercent = 100;
             clearedDungeon = true;
-            const sharedState = usesSharedDungeonProgress(currentLevel) && levelScope
-                ? getOrCreateSharedDungeonProgressState(levelScope)
-                : null;
-            if (sharedState) {
-                sharedState.progress = 100;
-                MissionHandler.broadcastSharedDungeonQuestProgress(levelScope, 100);
-            }
+            MissionHandler.logNephitQuestCompletion('dungeonCompletionValidated', client, {
+                levelScope,
+                effectiveCompletionPercent,
+                forceSharedDungeonCompletionAllowed,
+                defeatedDungeonBossForcesCompletion
+            });
         }
         noteDungeonRunCompletionProgress(client, effectiveCompletionPercent);
+        const allowSharedServerFullClearCompletion =
+            clearedDungeon &&
+            usesSharedDungeonProgress(currentLevel) &&
+            effectiveCompletionPercent >= 100 &&
+            levelScope &&
+            !MissionHandler.hasRemainingDungeonHostiles(levelScope);
+
+        if (
+            clearedDungeon &&
+            dungeonRequiresSpecificCompletionObjectives &&
+            !forceSharedDungeonCompletionAllowed &&
+            !dungeonCompletionObjectivesMet &&
+            !allowSharedServerFullClearCompletion
+        ) {
+            return;
+        }
+
+        if (
+            !forceSharedDungeonCompletionAllowed &&
+            !serverValidatedDungeonCompletion &&
+            !MissionHandler.canAcceptClientReportedDungeonCompletion(
+                client,
+                currentLevel,
+                levelScope,
+                clearedDungeon,
+                effectiveCompletionPercent
+            )
+        ) {
+            return;
+        }
+
+        if (
+            clearedDungeon &&
+            levelScope &&
+            !client.pendingDungeonCompletionFlushActive &&
+            !(
+                MissionHandler.clientCompletionReleasesPostDeathBossCutscene(currentLevel) &&
+                defeatedDungeonBossForcesCompletion &&
+                dungeonCompletionObjectivesMet
+            ) &&
+            MissionHandler.shouldWaitForDungeonCompletionGate(
+                client,
+                currentLevel,
+                levelScope,
+                defeatedDungeonBossForcesCompletion
+            )
+        ) {
+            MissionHandler.scheduleDungeonCompletion(
+                client,
+                data,
+                {
+                    forcedDungeonCompletionScope: forceSharedDungeonCompletion ? levelScope : undefined,
+                    initialDelayMs: 0,
+                    settleDelayMs: 0,
+                    waitForCutsceneEnd: true
+                }
+            );
+            return;
+        }
 
         if (
             clearedDungeon &&
@@ -1253,10 +1540,6 @@ export class MissionHandler {
             return;
         }
 
-        const reservedParticipantKey = clearedDungeon && levelScope
-            ? DungeonCompletionSystem.getParticipantKey(client)
-            : '';
-        try {
         let didMutate = false;
         if (currentLevel === 'TutorialBoat' || MissionHandler.isTutorialRescueDungeon(currentLevel)) {
             clearedDungeon = true;
@@ -1422,7 +1705,18 @@ export class MissionHandler {
         }
 
         if (didMutate) {
+            MissionHandler.logNephitQuestCompletion('savePersistenceStart', client, {
+                levelScope,
+                completedMissionId,
+                completedMissionState: completedMissionUpdate?.state ?? null,
+                questTrackerState: client.character.questTrackerState ?? null
+            });
             MissionHandler.saveCharacter(client, 'level completion mission update');
+            MissionHandler.logNephitQuestCompletion('savePersistenceComplete', client, {
+                levelScope,
+                completedMissionId,
+                completedMissionState: completedMissionUpdate?.state ?? null
+            });
             if (currentLevel === 'CraftTownTutorial' && completedMissionId === MissionID.ClearYourHouse) {
                 MissionHandler.logKeepCompletionProgress('keepRebuildStatePersisted', client, {
                     levelScope,
@@ -1439,6 +1733,9 @@ export class MissionHandler {
             currentLevel === 'CraftTownTutorial' &&
             completedMissionId === MissionID.ClearYourHouse
         ) {
+            if (completedMissionUpdate) {
+                MissionHandler.applyCraftTownTutorialCompletionToParty(client, levelScope, completedMissionUpdate);
+            }
             MissionHandler.sendCraftTownTutorialHomeDoorTarget(client);
             MissionHandler.logKeepCompletionProgress('tutorialTriggerFired', client, {
                 levelScope,
@@ -1456,14 +1753,8 @@ export class MissionHandler {
                 timeBonus: completionResult.timeBonusScore
             });
         }
-        if (clearedDungeon && levelScope) {
-            MissionHandler.scheduleDungeonCompletionForScope(levelScope, client);
-        }
-        } catch (error) {
-            if (levelScope && reservedParticipantKey) {
-                DungeonCompletionSystem.cancelFinalization(levelScope, reservedParticipantKey);
-            }
-            throw error;
+        if (forceSharedDungeonCompletion && client.forcedDungeonCompletionScope === levelScope) {
+            client.forcedDungeonCompletionScope = '';
         }
     }
 
@@ -1542,20 +1833,15 @@ export class MissionHandler {
         }
 
         const levelScope = getClientLevelScope(client);
-        if (!levelScope || !LevelConfig.isDungeonLevel(currentLevel)) {
+        if (!levelScope || client.forcedDungeonCompletionScope === levelScope) {
             return;
         }
 
-        if (currentLevel === 'TutorialDungeon') {
-            TutorialDungeonMechanics.noteEntityDefeated(client, destroyedEntity);
-        }
+        if (currentLevel === 'CraftTownTutorial') {
+            if (!MissionHandler.isCraftTownTutorialBossEntity(destroyedEntity)) {
+                return;
+            }
 
-        DungeonCompletionSystem.noteEntityDefeated(levelScope, destroyedEntity);
-
-        if (
-            currentLevel === 'CraftTownTutorial' &&
-            DungeonCompletionConditions.isRequiredBoss(currentLevel, destroyedEntity)
-        ) {
             if (client.keepTutorialState) {
                 client.keepTutorialState.bossDefeated = true;
             }
@@ -1564,96 +1850,155 @@ export class MissionHandler {
                 destroyedEntity.hp = 0;
                 destroyedEntity.entState = EntityState.DEAD;
             }
+            MissionHandler.markRequiredDungeonBossDefeated(levelScope, currentLevel, destroyedEntity);
             MissionHandler.logKeepCompletionProgress('bossDeathDetected', client, {
                 levelScope,
                 entityId: Math.max(0, Math.round(Number(destroyedEntity?.id ?? 0))),
                 entityName: MissionHandler.getEntityName(destroyedEntity)
             });
-        }
 
-        const evaluation = DungeonCompletionSystem.evaluate(levelScope);
-        if (!evaluation.ready) {
+            MissionHandler.scheduleDungeonCompletion(
+                client,
+                MissionHandler.buildSyntheticLevelCompletePacket(100),
+                {
+                    forcedDungeonCompletionScope: levelScope,
+                    initialDelayMs: 0,
+                    settleDelayMs: 0,
+                    waitForCutsceneEnd: true
+                }
+            );
+            MissionHandler.logKeepCompletionProgress('dungeonCompletionEventFired', client, {
+                levelScope,
+                waitForCutsceneEnd: true
+            });
             return;
         }
 
-        if (DungeonCompletionConditions.isRequiredBoss(currentLevel, destroyedEntity)) {
-            const bossRoomId = MissionHandler.getEntityRoomId(destroyedEntity);
-            if (bossRoomId > 0) {
-                noteDungeonRunBossCutscene(
-                    levelScope,
-                    bossRoomId,
-                    Math.max(0, Math.round(Number(destroyedEntity?.id ?? 0)))
-                );
-            }
+        if (!LevelConfig.isDungeonLevel(currentLevel)) {
+            return;
         }
-        MissionHandler.scheduleDungeonCompletionForScope(levelScope, client);
+
+        if (currentLevel === 'TutorialBoat') {
+            return;
+        }
+
+        if (!MissionHandler.shouldForceCompleteDungeonOnEnemyDefeat(levelScope, destroyedEntity)) {
+            MissionHandler.logNephitQuestCompletion('bossDeathIgnored', client, {
+                levelScope,
+                reason: 'completion_objectives_not_met',
+                entityId: Math.max(0, Math.round(Number(destroyedEntity?.id ?? 0))),
+                entityName: MissionHandler.getEntityName(destroyedEntity),
+                hp: Number(destroyedEntity?.hp ?? NaN),
+                entState: Number(destroyedEntity?.entState ?? NaN),
+                dead: Boolean(destroyedEntity?.dead)
+            });
+            return;
+        }
+
+        MissionHandler.scheduleForcedDungeonCompletionIfAllowed(client, currentLevel, levelScope, destroyedEntity);
     }
 
     static async handleForcedDungeonObjectiveCompletion(client: Client, destroyedEntity: any): Promise<void> {
-        await MissionHandler.handleForcedDungeonBossCompletion(client, destroyedEntity);
-    }
-
-    private static scheduleDungeonCompletionForScope(levelScope: string, sourceClient?: Client): void {
-        if (!levelScope || !DungeonCompletionSystem.evaluate(levelScope).ready) {
+        if (!client.character) {
             return;
         }
 
-        const payload = MissionHandler.buildSyntheticLevelCompletePacket(100);
-        for (const session of GlobalState.sessionsByToken.values()) {
-            if (
-                !session.playerSpawned ||
-                !session.character ||
-                getClientLevelScope(session) !== levelScope ||
-                MissionHandler.hasFinalizedDungeonCompletion(session, levelScope)
-            ) {
-                continue;
-            }
-            MissionHandler.scheduleDungeonCompletion(session, payload, {
-                initialDelayMs: 0,
-                settleDelayMs: 0
-            });
+        const currentLevel =
+            LevelConfig.normalizeLevelName(client.currentLevel || String(client.character.CurrentLevel?.name ?? '')) ||
+            client.currentLevel ||
+            String(client.character.CurrentLevel?.name ?? '');
+        if (!currentLevel || !LevelConfig.isDungeonLevel(currentLevel) || currentLevel === 'TutorialBoat') {
+            return;
         }
-    }
 
-    static tryRestoreDungeonCompletionAfterReentry(client: Client): void {
         const levelScope = getClientLevelScope(client);
-        if (!TutorialDungeonMechanics.isTutorialDungeon(levelScope)) {
+        if (!levelScope || client.forcedDungeonCompletionScope === levelScope) {
             return;
         }
-        const completionState = DungeonCompletionSystem.getState(levelScope);
-        if (!completionState) {
+
+        if (!MissionHandler.isRequiredDungeonChestEntity(currentLevel, destroyedEntity)) {
             return;
         }
-        const participantKey = DungeonCompletionSystem.getParticipantKey(client);
-        if (DungeonCompletionSystem.hasFinalized(levelScope, participantKey)) {
-            TutorialDungeonMechanics.noteCompletionPhase(levelScope, 'completed', client.token);
+
+        MissionHandler.markRequiredDungeonChestDestroyed(levelScope);
+        if (!MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope)) {
             return;
         }
-        const evaluation = DungeonCompletionSystem.evaluate(levelScope);
-        TutorialDungeonMechanics.noteCompletionPhase(
+
+        MissionHandler.scheduleForcedDungeonCompletionIfAllowed(client, currentLevel, levelScope, destroyedEntity);
+    }
+
+    private static scheduleForcedDungeonCompletionIfAllowed(client: Client, currentLevel: string, levelScope: string, triggerEntity: any): void {
+        const authorityToken = resolveSharedDungeonProgressAuthorityToken(levelScope);
+        if (authorityToken > 0 && authorityToken !== client.token) {
+            MissionHandler.logNephitQuestCompletion('bossDeathIgnored', client, {
+                levelScope,
+                reason: 'not_progress_authority',
+                authorityToken,
+                clientToken: client.token
+            });
+            return;
+        }
+
+        if (getActiveDungeonRunStats(client)?.finalizedStats) {
+            MissionHandler.logNephitQuestCompletion('bossDeathIgnored', client, {
+                levelScope,
+                reason: 'run_stats_finalized'
+            });
+            return;
+        }
+
+        const isCutsceneActive = String(client.activeDungeonCutsceneScope ?? '').trim() === levelScope;
+        const isBossEntity =
+            MissionHandler.isDungeonCompletionBossEntity(triggerEntity) ||
+            MissionHandler.isRequiredDungeonCompletionBossEntity(currentLevel, triggerEntity);
+        if (isBossEntity) {
+            const bossRoomId = MissionHandler.getEntityRoomId(triggerEntity);
+            if (bossRoomId > 0) {
+                noteDungeonRunBossCutscene(levelScope, bossRoomId, Math.max(0, Math.round(Number(triggerEntity?.id ?? 0))));
+            }
+        }
+        const waitForCutsceneEnd = isCutsceneActive ||
+            (isBossEntity && MissionHandler.hasPostDeathBossCutscene(currentLevel));
+        MissionHandler.logNephitQuestCompletion('bossDeathDetected', client, {
             levelScope,
-            evaluation.ready ? 'ready' : evaluation.phase === 'waiting-gates' ? 'waiting-gates' : 'running',
-            client.token
+            entityId: Math.max(0, Math.round(Number(triggerEntity?.id ?? 0))),
+            entityName: MissionHandler.getEntityName(triggerEntity),
+            isBossEntity,
+            isCutsceneActive,
+            waitForCutsceneEnd
+        });
+        MissionHandler.scheduleDungeonCompletion(
+            client,
+            MissionHandler.buildSyntheticLevelCompletePacket(100),
+            {
+                forcedDungeonCompletionScope: levelScope,
+                initialDelayMs: waitForCutsceneEnd ? 0 : undefined,
+                settleDelayMs: waitForCutsceneEnd ? 0 : undefined,
+                waitForCutsceneEnd
+            }
         );
-        if (evaluation.ready) {
-            MissionHandler.scheduleDungeonCompletionForScope(levelScope, client);
-        }
     }
 
     private static hasFinalizedDungeonCompletion(client: Client, levelScope: string | null | undefined): boolean {
         const scopeKey = String(levelScope ?? '').trim();
-        return Boolean(scopeKey && DungeonCompletionSystem.hasFinalized(
-            scopeKey,
-            DungeonCompletionSystem.getParticipantKey(client)
-        ));
+        return Boolean(
+            scopeKey &&
+            (
+                String(client.completedDungeonCompletionScope ?? '').trim() === scopeKey ||
+                String(client.finalizingDungeonCompletionScope ?? '').trim() === scopeKey
+            )
+        );
     }
 
     private static tryReserveDungeonCompletionFinalization(client: Client, levelScope: string | null | undefined): boolean {
         const scopeKey = String(levelScope ?? '').trim();
-        return Boolean(scopeKey && DungeonCompletionSystem.tryReserveFinalization(
-            scopeKey,
-            DungeonCompletionSystem.getParticipantKey(client)
-        ));
+        if (!scopeKey || MissionHandler.hasFinalizedDungeonCompletion(client, scopeKey)) {
+            return false;
+        }
+
+        client.finalizingDungeonCompletionScope = scopeKey;
+        return true;
     }
 
     private static markDungeonCompletionFinalized(client: Client, levelScope: string | null | undefined): void {
@@ -1662,46 +2007,119 @@ export class MissionHandler {
             return;
         }
 
-        const participantKey = DungeonCompletionSystem.getParticipantKey(client);
-        DungeonCompletionSystem.markFinalized(scopeKey, participantKey);
-        const completionState = DungeonCompletionSystem.getState(scopeKey);
-        TutorialDungeonMechanics.noteCompletionPhase(
-            scopeKey,
-            completionState?.phase === 'completed' ? 'completed' : 'ready',
-            client.token
-        );
+        client.completedDungeonCompletionScope = scopeKey;
+        client.completedDungeonCompletionSentAt = Date.now();
+        if (String(client.finalizingDungeonCompletionScope ?? '').trim() === scopeKey) {
+            client.finalizingDungeonCompletionScope = '';
+        }
+        MissionHandler.dungeonCompletionObjectiveProgress.delete(scopeKey);
         const sharedState = GlobalState.levelQuestProgress.get(scopeKey);
         if (sharedState) {
             sharedState.progress = 100;
+            sharedState.completionRequested = true;
             sharedState.defeatedHostileIds = new Set(sharedState.trackedHostileIds ?? sharedState.defeatedHostileIds ?? []);
         }
+        MissionHandler.logNephitQuestCompletion('dungeonCompletionFinalized', client, {
+            levelScope: scopeKey,
+            sharedProgress: sharedState?.progress ?? null
+        });
     }
 
     private static getPendingDungeonCompletionNextDelayMs(client: Client): number {
         const now = Date.now();
+        if (client.pendingDungeonCompletionWaitForCutsceneEnd) {
+            if (MissionHandler.requiresExplicitCompletionCutsceneEnd(getScopeLevelName(getClientLevelScope(client)))) {
+                return MissionHandler.DUNGEON_COMPLETION_MAX_DEFER_MS;
+            }
+
+            const requestedAt = Math.max(0, Number(client.pendingDungeonCompletionRequestedAt ?? 0)) || now;
+            return Math.max(0, (requestedAt + MissionHandler.DUNGEON_COMPLETION_MAX_DEFER_MS) - now);
+        }
+
         const notBeforeAt = Math.max(0, Number(client.pendingDungeonCompletionNotBeforeAt ?? 0));
         return Math.max(0, notBeforeAt - now);
     }
 
-    private static dispatchOrArmPendingDungeonCompletion(client: Client): void {
-        const delayMs = MissionHandler.getPendingDungeonCompletionNextDelayMs(client);
-        const settleDelayMs = Math.max(0, Number(client.pendingDungeonCompletionSettleMs ?? 0));
-        if (delayMs <= 0 && settleDelayMs <= 0) {
-            // A zero-delay completion is already protected by the authoritative
-            // condition gate and participant reservation. Dispatch inline so a
-            // movement-packet backlog cannot starve a setTimeout(0) callback.
-            void MissionHandler.flushPendingDungeonCompletion(client);
-            return;
+    private static shouldWaitForDungeonCompletionGate(
+        client: Client,
+        currentLevel: string,
+        levelScope: string,
+        defeatedDungeonBossForcesCompletion: boolean
+    ): boolean {
+        const activeCutsceneScope = String(client.activeDungeonCutsceneScope ?? '').trim();
+        if (activeCutsceneScope === levelScope) {
+            return true;
         }
-        MissionHandler.armPendingDungeonCompletionTimer(client, delayMs);
+
+        if (!defeatedDungeonBossForcesCompletion) {
+            return false;
+        }
+
+        const bossDefeatAt = MissionHandler.getDungeonBossDefeatAt(client, levelScope);
+        const bossCutsceneEndAt = String(client.lastDungeonCutsceneEndScope ?? '').trim() === levelScope
+            ? Math.max(0, Number(client.lastDungeonCutsceneEndAt ?? 0))
+            : 0;
+        const bossCutsceneStartAt = String(client.lastDungeonCutsceneStartScope ?? '').trim() === levelScope
+            ? Math.max(0, Number(client.lastDungeonCutsceneStartAt ?? 0))
+            : 0;
+        const postDeathCutsceneStarted =
+            bossDefeatAt > 0 &&
+            bossCutsceneStartAt >= bossDefeatAt;
+
+        return (
+            (
+                postDeathCutsceneStarted &&
+                (bossCutsceneEndAt <= 0 || bossCutsceneEndAt < bossCutsceneStartAt)
+            ) ||
+            (
+                MissionHandler.hasPostDeathBossCutscene(currentLevel) &&
+                (
+                    bossDefeatAt <= 0 ||
+                    bossCutsceneEndAt <= 0 ||
+                    bossCutsceneEndAt < bossDefeatAt
+                )
+            )
+        );
+    }
+
+    private static canAcceptClientReportedDungeonCompletion(
+        client: Client,
+        currentLevel: string,
+        levelScope: string,
+        clearedDungeon: boolean,
+        completionPercent: number
+    ): boolean {
+        if (!LevelConfig.isDungeonLevel(currentLevel)) {
+            return true;
+        }
+
+        if (!clearedDungeon) {
+            return false;
+        }
+
+        if (currentLevel === 'TutorialBoat' || MissionHandler.isTutorialRescueDungeon(currentLevel)) {
+            return true;
+        }
+
+        if (MissionHandler.isFullClearOnlyDungeon(currentLevel)) {
+            return Math.max(0, Number(completionPercent ?? 0)) >= 100;
+        }
+
+        if (MissionHandler.requiresBossDefeatForDungeon(currentLevel)) {
+            return MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope);
+        }
+
+        return !MissionHandler.hasRemainingDungeonHostiles(levelScope);
     }
 
     static scheduleDungeonCompletion(
         client: Client,
         payload: Buffer,
         options: {
+            forcedDungeonCompletionScope?: string;
             initialDelayMs?: number;
             settleDelayMs?: number;
+            waitForCutsceneEnd?: boolean;
         } = {}
     ): void {
         const levelScope = getClientLevelScope(client);
@@ -1710,10 +2128,6 @@ export class MissionHandler {
         }
 
         if (MissionHandler.hasFinalizedDungeonCompletion(client, levelScope)) {
-            return;
-        }
-        const condition = DungeonCompletionConditions.get(getScopeLevelName(levelScope));
-        if (condition && !DungeonCompletionSystem.evaluate(levelScope).ready) {
             return;
         }
 
@@ -1732,6 +2146,8 @@ export class MissionHandler {
             const existingNotBeforeAt = Math.max(0, Number(client.pendingDungeonCompletionNotBeforeAt ?? 0));
             const nextNotBeforeAt = now + initialDelayMs;
             const existingSettleMs = Math.max(0, Number(client.pendingDungeonCompletionSettleMs ?? 0));
+            const forcedScope = String(options.forcedDungeonCompletionScope ?? '').trim();
+
             client.pendingDungeonCompletionRequestedAt = requestedAt;
             client.pendingDungeonCompletionLastSkitAt = Math.max(
                 requestedAt,
@@ -1742,7 +2158,24 @@ export class MissionHandler {
                 : nextNotBeforeAt;
             client.pendingDungeonCompletionSettleMs = Math.max(existingSettleMs, settleDelayMs);
             client.pendingDungeonCompletionPayload = Buffer.from(payload);
-            MissionHandler.dispatchOrArmPendingDungeonCompletion(client);
+            if (forcedScope) {
+                client.pendingDungeonCompletionForceSharedScope = forcedScope;
+            }
+            client.pendingDungeonCompletionWaitForCutsceneEnd =
+                Boolean(client.pendingDungeonCompletionWaitForCutsceneEnd) ||
+                Boolean(options.waitForCutsceneEnd);
+
+            MissionHandler.logNephitQuestCompletion('dungeonCompletionTriggerMerged', client, {
+                levelScope,
+                forcedScope,
+                initialDelayMs,
+                settleDelayMs,
+                waitForCutsceneEnd: client.pendingDungeonCompletionWaitForCutsceneEnd
+            });
+            MissionHandler.armPendingDungeonCompletionTimer(
+                client,
+                MissionHandler.getPendingDungeonCompletionNextDelayMs(client)
+            );
             return;
         }
 
@@ -1752,7 +2185,20 @@ export class MissionHandler {
         client.pendingDungeonCompletionNotBeforeAt = now + initialDelayMs;
         client.pendingDungeonCompletionSettleMs = settleDelayMs;
         client.pendingDungeonCompletionPayload = Buffer.from(payload);
-        MissionHandler.dispatchOrArmPendingDungeonCompletion(client);
+        client.pendingDungeonCompletionForceSharedScope = String(options.forcedDungeonCompletionScope ?? '').trim();
+        client.pendingDungeonCompletionWaitForCutsceneEnd = Boolean(options.waitForCutsceneEnd);
+
+        MissionHandler.logNephitQuestCompletion('dungeonCompletionTriggered', client, {
+            levelScope,
+            forcedScope: client.pendingDungeonCompletionForceSharedScope,
+            initialDelayMs,
+            settleDelayMs,
+            waitForCutsceneEnd: client.pendingDungeonCompletionWaitForCutsceneEnd
+        });
+        MissionHandler.armPendingDungeonCompletionTimer(
+            client,
+            MissionHandler.getPendingDungeonCompletionNextDelayMs(client)
+        );
     }
 
     static noteDungeonSkitActivity(client: Client): void {
@@ -1768,6 +2214,25 @@ export class MissionHandler {
             requestedAt > 0 ? requestedAt + 1 : 0
         );
 
+        if (client.pendingDungeonCompletionWaitForCutsceneEnd) {
+            client.pendingDungeonCompletionSettleMs = Math.max(
+                MissionHandler.DUNGEON_COMPLETION_SKIT_SETTLE_MS,
+                Number(client.pendingDungeonCompletionSettleMs ?? 0)
+            );
+            const remainingNotBeforeMs = Math.max(
+                0,
+                Number(client.pendingDungeonCompletionNotBeforeAt ?? 0) - Date.now()
+            );
+            MissionHandler.armPendingDungeonCompletionTimer(
+                client,
+                Math.max(
+                    remainingNotBeforeMs,
+                    Number(client.pendingDungeonCompletionSettleMs ?? MissionHandler.DUNGEON_COMPLETION_SKIT_SETTLE_MS)
+                )
+            );
+            return;
+        }
+
         const settleDelayMs = Math.max(0, Number(client.pendingDungeonCompletionSettleMs ?? MissionHandler.DUNGEON_COMPLETION_SKIT_SETTLE_MS));
         const remainingNotBeforeMs = Math.max(
             0,
@@ -1780,12 +2245,12 @@ export class MissionHandler {
     }
 
     static isWaitingForDungeonCompletionCutscene(client: Client): boolean {
-        const levelScope = getClientLevelScope(client);
-        if (!levelScope) {
-            return false;
-        }
-        const evaluation = DungeonCompletionSystem.evaluate(levelScope);
-        return evaluation.phase === 'waiting-gates' && evaluation.reason === 'cutscene_gate_pending';
+        const pendingScope = String(client.pendingDungeonCompletionScope ?? '').trim();
+        return Boolean(
+            pendingScope &&
+            getClientLevelScope(client) === pendingScope &&
+            client.pendingDungeonCompletionWaitForCutsceneEnd
+        );
     }
 
     static noteDungeonCutsceneStart(client: Client, roomId: number): void {
@@ -1798,9 +2263,12 @@ export class MissionHandler {
         client.activeDungeonCutsceneRoomId = Math.max(0, Math.round(Number(roomId ?? 0)));
         client.lastDungeonCutsceneStartScope = scope;
         client.lastDungeonCutsceneStartAt = Date.now();
-        DungeonCompletionSystem.noteCutsceneStart(scope, roomId, client.lastDungeonCutsceneStartAt);
-        TutorialDungeonMechanics.noteCutscenePhase(scope, roomId, 'active', client.token);
         MissionHandler.activateBossRunStatsForCutsceneRoom(client, scope, client.activeDungeonCutsceneRoomId);
+        MissionHandler.logNephitQuestCompletion('cutsceneStart', client, {
+            levelScope: scope,
+            roomId: client.activeDungeonCutsceneRoomId,
+            pendingCompletion: String(client.pendingDungeonCompletionScope ?? '').trim() === scope
+        });
     }
 
     static noteDungeonCutsceneEnd(client: Client, roomId: number): void {
@@ -1812,26 +2280,21 @@ export class MissionHandler {
         const endedRoomId = Math.max(0, Math.round(Number(roomId ?? 0)));
         const activeCutsceneScope = String(client.activeDungeonCutsceneScope ?? '').trim();
         const pendingScope = String(client.pendingDungeonCompletionScope ?? '').trim();
+        const shouldReleasePendingCompletion =
+            pendingScope === scope &&
+            Boolean(client.pendingDungeonCompletionWaitForCutsceneEnd);
         if (
             activeCutsceneScope === scope &&
             client.activeDungeonCutsceneRoomId > 0 &&
             endedRoomId > 0 &&
-            client.activeDungeonCutsceneRoomId !== endedRoomId
+            client.activeDungeonCutsceneRoomId !== endedRoomId &&
+            !shouldReleasePendingCompletion
         ) {
             return;
         }
 
         client.lastDungeonCutsceneEndScope = scope;
         client.lastDungeonCutsceneEndAt = Date.now();
-        const completionReady = DungeonCompletionSystem.noteCutsceneEnd(
-            scope,
-            endedRoomId,
-            client.lastDungeonCutsceneEndAt
-        );
-        TutorialDungeonMechanics.noteCutscenePhase(scope, endedRoomId, 'completed', client.token);
-        if (completionReady) {
-            TutorialDungeonMechanics.noteCompletionPhase(scope, 'ready', client.token);
-        }
         if (getScopeLevelName(scope) === 'CraftTownTutorial') {
             MissionHandler.logKeepCompletionProgress('cutsceneEndProcessed', client, {
                 levelScope: scope,
@@ -1839,6 +2302,12 @@ export class MissionHandler {
                 pendingCompletion: pendingScope === scope
             });
         }
+        MissionHandler.logNephitQuestCompletion('cutsceneEnd', client, {
+            levelScope: scope,
+            roomId: endedRoomId,
+            pendingCompletion: pendingScope === scope,
+            releasePendingCompletion: shouldReleasePendingCompletion
+        });
         if (!client.lastDungeonCutsceneStartScope) {
             client.lastDungeonCutsceneStartScope = scope;
             client.lastDungeonCutsceneStartAt = client.lastDungeonCutsceneEndAt;
@@ -1850,12 +2319,11 @@ export class MissionHandler {
         }
 
         if (pendingScope && pendingScope === scope) {
+            client.pendingDungeonCompletionWaitForCutsceneEnd = false;
             void MissionHandler.flushPendingDungeonCompletion(client);
         }
 
-        if (completionReady) {
-            MissionHandler.scheduleDungeonCompletionForScope(scope, client);
-        }
+        MissionHandler.trySchedulePostCutsceneDungeonCompletion(client, scope);
     }
 
     private static activateBossRunStatsForCutsceneRoom(client: Client, levelScope: string, roomId: number): void {
@@ -1896,7 +2364,7 @@ export class MissionHandler {
             }
 
             const entityId = Math.max(0, Math.round(Number(entity.id ?? entity.entId ?? entity.EntityID ?? 0)));
-            if (entityId <= 0 || !DungeonCompletionConditions.isRequiredBoss(levelName, entity)) {
+            if (entityId <= 0 || !MissionHandler.isDungeonCompletionBossEntity(entity)) {
                 continue;
             }
 
@@ -1910,6 +2378,19 @@ export class MissionHandler {
         return fallbackBossId;
     }
 
+    private static requiresExplicitCompletionCutsceneEnd(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(normalizedLevel && MissionHandler.DUNGEONS_REQUIRING_EXPLICIT_COMPLETION_CUTSCENE_END.has(normalizedLevel));
+    }
+
+    private static clientCompletionReleasesPostDeathBossCutscene(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(
+            normalizedLevel &&
+            MissionHandler.DUNGEONS_WHERE_CLIENT_COMPLETION_RELEASES_POST_DEATH_CUTSCENE.has(normalizedLevel)
+        );
+    }
+
     static shouldCompleteDungeonFromBossHpReport(client: Client, entity: any): boolean {
         if (!client.character) {
             return false;
@@ -1921,8 +2402,49 @@ export class MissionHandler {
             String(client.character.CurrentLevel?.name ?? '');
         return Boolean(
             currentLevel &&
-            DungeonCompletionConditions.allowsDefeatedBossProxyCopies(currentLevel) &&
-            DungeonCompletionConditions.isRequiredBoss(currentLevel, entity)
+            MissionHandler.DUNGEONS_WITH_REQUIRED_BOSS_PROXY_COPIES.has(currentLevel) &&
+            MissionHandler.isRequiredDungeonCompletionBossEntity(currentLevel, entity)
+        );
+    }
+
+    private static trySchedulePostCutsceneDungeonCompletion(client: Client, levelScope: string): void {
+        if (!client.character || !levelScope) {
+            return;
+        }
+
+        if (MissionHandler.hasFinalizedDungeonCompletion(client, levelScope)) {
+            return;
+        }
+
+        if (String(client.pendingDungeonCompletionScope ?? '').trim() === levelScope) {
+            return;
+        }
+
+        const currentLevel =
+            LevelConfig.normalizeLevelName(client.currentLevel || String(client.character.CurrentLevel?.name ?? '')) ||
+            client.currentLevel ||
+            String(client.character.CurrentLevel?.name ?? '');
+        if (
+            !currentLevel ||
+            !LevelConfig.isDungeonLevel(currentLevel) ||
+            !MissionHandler.hasPostDeathBossCutscene(currentLevel)
+        ) {
+            return;
+        }
+
+        if (!MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope)) {
+            return;
+        }
+
+        MissionHandler.scheduleDungeonCompletion(
+            client,
+            MissionHandler.buildSyntheticLevelCompletePacket(100),
+            {
+                forcedDungeonCompletionScope: levelScope,
+                initialDelayMs: 0,
+                settleDelayMs: 0,
+                waitForCutsceneEnd: false
+            }
         );
     }
 
@@ -1950,7 +2472,9 @@ export class MissionHandler {
         client.pendingDungeonCompletionNotBeforeAt = 0;
         client.pendingDungeonCompletionSettleMs = 0;
         client.pendingDungeonCompletionPayload = null;
+        client.pendingDungeonCompletionForceSharedScope = '';
         client.pendingDungeonCompletionFlushActive = false;
+        client.pendingDungeonCompletionWaitForCutsceneEnd = false;
     }
 
     private static async flushPendingDungeonCompletion(client: Client): Promise<void> {
@@ -1968,6 +2492,81 @@ export class MissionHandler {
 
         const now = Date.now();
         const requestedAt = Math.max(0, Number(client.pendingDungeonCompletionRequestedAt ?? 0));
+        if (client.pendingDungeonCompletionWaitForCutsceneEnd) {
+            if (MissionHandler.requiresExplicitCompletionCutsceneEnd(getScopeLevelName(pendingScope))) {
+                const cutsceneEndAt = String(client.lastDungeonCutsceneEndScope ?? '').trim() === pendingScope
+                    ? Math.max(0, Number(client.lastDungeonCutsceneEndAt ?? 0))
+                    : 0;
+                if (cutsceneEndAt < requestedAt) {
+                    MissionHandler.logNephitQuestCompletion('completionFlushWaitingForCutsceneEnd', client, {
+                        levelScope: pendingScope,
+                        requestedAt,
+                        cutsceneEndAt
+                    });
+                    MissionHandler.armPendingDungeonCompletionTimer(client, MissionHandler.DUNGEON_COMPLETION_MAX_DEFER_MS);
+                    return;
+                }
+
+                client.pendingDungeonCompletionWaitForCutsceneEnd = false;
+            } else {
+                const cutsceneWaitDeadlineAt = requestedAt + MissionHandler.DUNGEON_COMPLETION_MAX_DEFER_MS;
+                const settleDelayMs = Math.max(
+                    0,
+                    Number(client.pendingDungeonCompletionSettleMs ?? MissionHandler.DUNGEON_COMPLETION_SKIT_SETTLE_MS)
+                );
+                const lastSkitAt = Math.max(requestedAt, Number(client.pendingDungeonCompletionLastSkitAt ?? 0));
+                const quietForMs = now - lastSkitAt;
+                if (lastSkitAt > requestedAt && quietForMs >= settleDelayMs) {
+                    client.pendingDungeonCompletionWaitForCutsceneEnd = false;
+                    if (String(client.activeDungeonCutsceneScope ?? '').trim() === pendingScope) {
+                        client.activeDungeonCutsceneScope = '';
+                        client.activeDungeonCutsceneRoomId = 0;
+                    }
+                } else if (lastSkitAt > requestedAt && now < cutsceneWaitDeadlineAt) {
+                    MissionHandler.logNephitQuestCompletion('completionFlushWaitingForSkitQuiet', client, {
+                        levelScope: pendingScope,
+                        quietForMs,
+                        settleDelayMs,
+                        waitForCutsceneEnd: true
+                    });
+                    MissionHandler.armPendingDungeonCompletionTimer(
+                        client,
+                        Math.max(0, Math.min(settleDelayMs - quietForMs, cutsceneWaitDeadlineAt - now))
+                    );
+                    return;
+                } else if (now < cutsceneWaitDeadlineAt) {
+                    MissionHandler.logNephitQuestCompletion('completionFlushWaitingForCutsceneActivity', client, {
+                        levelScope: pendingScope,
+                        remainingMs: cutsceneWaitDeadlineAt - now
+                    });
+                    MissionHandler.armPendingDungeonCompletionTimer(client, cutsceneWaitDeadlineAt - now);
+                    return;
+                }
+
+                client.pendingDungeonCompletionWaitForCutsceneEnd = false;
+                if (String(client.activeDungeonCutsceneScope ?? '').trim() === pendingScope) {
+                    client.activeDungeonCutsceneScope = '';
+                    client.activeDungeonCutsceneRoomId = 0;
+                }
+            }
+        }
+
+        const activeCutsceneScope = String(client.activeDungeonCutsceneScope ?? '').trim();
+        if (activeCutsceneScope && activeCutsceneScope === pendingScope) {
+            const activeCutsceneWaitDeadlineAt = requestedAt + MissionHandler.DUNGEON_COMPLETION_MAX_DEFER_MS;
+            if (now < activeCutsceneWaitDeadlineAt) {
+                MissionHandler.logNephitQuestCompletion('completionFlushWaitingForActiveCutscene', client, {
+                    levelScope: pendingScope,
+                    remainingMs: activeCutsceneWaitDeadlineAt - now
+                });
+                MissionHandler.armPendingDungeonCompletionTimer(client, MissionHandler.DUNGEON_COMPLETION_SKIT_SETTLE_MS);
+                return;
+            }
+
+            client.activeDungeonCutsceneScope = '';
+            client.activeDungeonCutsceneRoomId = 0;
+        }
+
         const lastSkitAt = Math.max(requestedAt, Number(client.pendingDungeonCompletionLastSkitAt ?? 0));
         const notBeforeAt = Math.max(requestedAt, Number(client.pendingDungeonCompletionNotBeforeAt ?? 0));
         const settleDelayMs = Math.max(0, Number(client.pendingDungeonCompletionSettleMs ?? MissionHandler.DUNGEON_COMPLETION_SKIT_SETTLE_MS));
@@ -1978,6 +2577,10 @@ export class MissionHandler {
         );
 
         if (now < notBeforeAt) {
+            MissionHandler.logNephitQuestCompletion('completionFlushWaitingForNotBefore', client, {
+                levelScope: pendingScope,
+                remainingMs: notBeforeAt - now
+            });
             MissionHandler.armPendingDungeonCompletionTimer(client, notBeforeAt - now);
             return;
         }
@@ -1986,6 +2589,12 @@ export class MissionHandler {
             quietForMs < settleDelayMs &&
             now < maxQuietWaitDeadline
         ) {
+            MissionHandler.logNephitQuestCompletion('completionFlushWaitingForSkitQuiet', client, {
+                levelScope: pendingScope,
+                quietForMs,
+                settleDelayMs,
+                waitForCutsceneEnd: false
+            });
             MissionHandler.armPendingDungeonCompletionTimer(
                 client,
                 settleDelayMs - quietForMs
@@ -1993,18 +2602,42 @@ export class MissionHandler {
             return;
         }
 
-        if (!DungeonCompletionSystem.evaluate(pendingScope).ready) {
+        const forcedScope = String(client.pendingDungeonCompletionForceSharedScope ?? '').trim();
+        const forcedLevelName = getScopeLevelName(forcedScope || pendingScope);
+        if (
+            forcedScope &&
+            !MissionHandler.canHonorForcedDungeonCompletion(client, forcedLevelName, forcedScope, true)
+        ) {
+            MissionHandler.logNephitQuestCompletion('completionFlushAborted', client, {
+                levelScope: pendingScope,
+                forcedScope,
+                reason: 'forced_completion_not_allowed'
+            });
+            if (client.forcedDungeonCompletionScope === forcedScope) {
+                client.forcedDungeonCompletionScope = '';
+            }
             MissionHandler.clearPendingDungeonCompletion(client);
             return;
         }
 
         MissionHandler.clearPendingDungeonCompletion(client);
 
+        if (forcedScope) {
+            client.forcedDungeonCompletionScope = forcedScope;
+        }
+
         try {
             client.pendingDungeonCompletionFlushActive = true;
+            MissionHandler.logNephitQuestCompletion('completionFlushDispatch', client, {
+                levelScope: pendingScope,
+                forcedScope
+            });
             await MissionHandler.handleSetLevelComplete(client, payload);
         } finally {
             client.pendingDungeonCompletionFlushActive = false;
+            if (forcedScope && client.forcedDungeonCompletionScope === forcedScope && getActiveDungeonRunStats(client)?.finalizedStats) {
+                client.forcedDungeonCompletionScope = '';
+            }
         }
     }
 
@@ -2478,6 +3111,7 @@ export class MissionHandler {
     }
 
     private static logKeepCompletionProgress(scope: string, client: Client, extra: Record<string, unknown> = {}): void {
+        DebugLogger.logProgress(`CraftTownTutorial:${scope}`, client, client.character, extra);
     }
 
     private static buildQuestProgressPayload(percent: number): Buffer {
@@ -2642,6 +3276,7 @@ export class MissionHandler {
             timeBonus: number;
         }
     ): void {
+        MissionHandler.logNephitQuestCompletion('rankScreenOpen', client, stats);
         const bb = new BitBuffer(false);
         bb.writeMethod6(Math.max(0, Math.min(stats.stars, 15)), 4);
         bb.writeMethod4(Math.max(0, stats.resultBar));
@@ -2693,6 +3328,108 @@ export class MissionHandler {
             doorId,
             targetLevel
         });
+    }
+
+    private static applyCraftTownTutorialCompletionToParty(
+        authorityClient: Client,
+        levelScope: string,
+        authorityMissionUpdate: DungeonMissionUpdateResult
+    ): void {
+        if (!levelScope) {
+            return;
+        }
+
+        const completedAt = Math.floor(Date.now() / 1000);
+        for (const other of GlobalState.sessionsByToken.values()) {
+            if (
+                other === authorityClient ||
+                !other.playerSpawned ||
+                getClientLevelScope(other) !== levelScope ||
+                !other.character
+            ) {
+                continue;
+            }
+
+            let didMutate = false;
+            const previousProgress = Number(other.character.questTrackerState ?? 0);
+            if (previousProgress !== 100) {
+                other.character.questTrackerState = 100;
+                didMutate = true;
+            }
+            MissionHandler.sendQuestProgress(other, 100);
+            MissionHandler.logKeepCompletionProgress('questObjectiveUpdated', other, {
+                levelScope,
+                from: previousProgress,
+                to: 100,
+                sourceToken: authorityClient.token
+            });
+
+            const missionUpdate = MissionHandler.updateDungeonMissionResult(other.character, 'CraftTownTutorial', {
+                stars: authorityMissionUpdate.persistedStars,
+                score: authorityMissionUpdate.persistedScore,
+                completedAt
+            });
+            if (missionUpdate.missionId !== MissionID.ClearYourHouse) {
+                if (didMutate) {
+                    MissionHandler.saveCharacter(other, 'party keep completion mission update');
+                    MissionHandler.logKeepCompletionProgress('keepRebuildStatePersisted', other, {
+                        levelScope,
+                        missionId: missionUpdate.missionId,
+                        sourceToken: authorityClient.token
+                    });
+                }
+                continue;
+            }
+
+            didMutate = true;
+            if (missionUpdate.newlyCompleted) {
+                MissionHandler.sendMissionAdded(other, MissionID.ClearYourHouse, missionUpdate.state);
+                MissionHandler.sendMissionComplete(other, MissionID.ClearYourHouse);
+            }
+
+            if (MissionHandler.ensureCraftTownKeepRepaired(other.character)) {
+                didMutate = true;
+                MissionHandler.logKeepCompletionProgress('keepRebuildStateApplied', other, {
+                    levelScope,
+                    keepRank: MissionHandler.CRAFT_TOWN_REPAIRED_KEEP_RANK,
+                    sourceToken: authorityClient.token
+                });
+            }
+
+            if (
+                MissionHandler.getMissionState(other.character, MissionID.ClearYourHouse) < MissionHandler.MISSION_CLAIMED &&
+                MissionHandler.claimKeepQuestCompletionReward(other, missionUpdate)
+            ) {
+                didMutate = true;
+                MissionHandler.logKeepCompletionProgress('questCompletionRewardClaimed', other, {
+                    levelScope,
+                    missionId: MissionID.ClearYourHouse,
+                    sourceToken: authorityClient.token
+                });
+            }
+
+            if (String(other.pendingDungeonCompletionScope ?? '').trim() === levelScope) {
+                MissionHandler.clearPendingDungeonCompletion(other);
+            }
+            if (String(other.activeDungeonCutsceneScope ?? '').trim() === levelScope) {
+                other.activeDungeonCutsceneScope = '';
+                other.activeDungeonCutsceneRoomId = 0;
+            }
+            MissionHandler.markDungeonCompletionFinalized(other, levelScope);
+            MissionHandler.sendCraftTownTutorialHomeDoorTarget(other);
+            MissionHandler.logKeepCompletionProgress('tutorialTriggerFired', other, {
+                levelScope,
+                trigger: 'homeDoorTargetAfterPartyCompletion',
+                sourceToken: authorityClient.token
+            });
+
+            MissionHandler.saveCharacter(other, 'party keep completion mission update');
+            MissionHandler.logKeepCompletionProgress('keepRebuildStatePersisted', other, {
+                levelScope,
+                missionId: MissionID.ClearYourHouse,
+                sourceToken: authorityClient.token
+            });
+        }
     }
 
     private static buildSyntheticLevelCompletePacket(completionPercent: number): Buffer {
@@ -2835,23 +3572,185 @@ export class MissionHandler {
         return [...names];
     }
 
-    static noteSharedDungeonProgressComplete(levelScope: string, authorityClient: Client): void {
-        DungeonCompletionSystem.noteClientCompletionSignal(
-            levelScope,
-            DungeonCompletionSystem.getParticipantKey(authorityClient),
-            100
-        );
-        if (DungeonCompletionSystem.evaluate(levelScope).ready) {
-            MissionHandler.scheduleDungeonCompletionForScope(levelScope, authorityClient);
+    static canAutoCompleteSharedDungeon(client: Client, levelScope: string | null | undefined): boolean {
+        const currentLevel =
+            LevelConfig.normalizeLevelName(client.currentLevel || String(client.character?.CurrentLevel?.name ?? '')) ||
+            client.currentLevel ||
+            String(client.character?.CurrentLevel?.name ?? '');
+        if (!MissionHandler.requiresCompletionBossDefeatForDungeon(currentLevel)) {
+            return true;
         }
+
+        if (
+            usesSharedDungeonProgress(currentLevel) &&
+            levelScope &&
+            !MissionHandler.hasRemainingDungeonHostiles(levelScope)
+        ) {
+            return true;
+        }
+
+        return MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope);
+    }
+
+    static getSharedDungeonAutoCompleteScheduleOptions(
+        client: Client,
+        levelScope: string
+    ): {
+        forcedDungeonCompletionScope?: string;
+        initialDelayMs?: number;
+        settleDelayMs?: number;
+        waitForCutsceneEnd?: boolean;
+    } {
+        const currentLevel =
+            LevelConfig.normalizeLevelName(client.currentLevel || String(client.character?.CurrentLevel?.name ?? '')) ||
+            client.currentLevel ||
+            String(client.character?.CurrentLevel?.name ?? '');
+        const waitForCutsceneEnd =
+            String(client.activeDungeonCutsceneScope ?? '').trim() === levelScope ||
+            (
+                MissionHandler.hasPostDeathBossCutscene(currentLevel) &&
+                String(client.lastDungeonCutsceneEndScope ?? '').trim() === levelScope &&
+                MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, currentLevel, levelScope)
+            );
+
+        return {
+            forcedDungeonCompletionScope: levelScope,
+            initialDelayMs: waitForCutsceneEnd ? 0 : undefined,
+            settleDelayMs: waitForCutsceneEnd ? 0 : undefined,
+            waitForCutsceneEnd
+        };
+    }
+
+    private static isDungeonMiniBossEntity(entity: any): boolean {
+        return GameData.getEntityRank(entity) === 'MiniBoss';
+    }
+
+    private static isDungeonCompletionBossEntity(entity: any): boolean {
+        if (MissionHandler.isDungeonMiniBossEntity(entity)) {
+            return false;
+        }
+
+        if (GameData.getEntityRank(entity) === 'Boss') {
+            return true;
+        }
+
+        return GameData.isBossEntity(entity);
+    }
+
+    private static requiresBossDefeatForDungeon(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(normalizedLevel && MissionHandler.DUNGEONS_REQUIRING_BOSS_DEFEAT.has(normalizedLevel));
+    }
+
+    private static requiresBossAndChestCompletionForDungeon(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(normalizedLevel && MissionHandler.DUNGEONS_REQUIRING_BOSS_AND_CHEST.has(normalizedLevel));
+    }
+
+    private static requiresCompletionBossDefeatForDungeon(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (!normalizedLevel) {
+            return false;
+        }
+
+        if (MissionHandler.requiresBossDefeatForDungeon(normalizedLevel)) {
+            return true;
+        }
+
+        if (GameData.hasDungeonBossEntities(normalizedLevel)) {
+            return true;
+        }
+
+        return NpcLoader.getRawNpcsForLevel(normalizedLevel).some((npc) =>
+            Number(npc?.team ?? 0) === EntityTeam.ENEMY &&
+            MissionHandler.isDungeonCompletionBossEntity(npc)
+        );
+    }
+
+    private static hasPostDeathBossCutscene(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(normalizedLevel && MissionHandler.DUNGEONS_WITH_POST_DEATH_BOSS_CUTSCENE.has(normalizedLevel));
+    }
+
+    private static isNephitQuestCompletionLevel(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(normalizedLevel && MissionHandler.NEPHIT_QUEST_COMPLETION_LEVELS.has(normalizedLevel));
+    }
+
+    private static logNephitQuestCompletion(
+        event: string,
+        client: Client | null,
+        details: Record<string, unknown> = {}
+    ): void {
+        const detailScope = String(details.levelScope ?? '').trim();
+        const detailLevel = String(details.levelName ?? '').trim();
+        const levelName =
+            LevelConfig.normalizeLevelName(client?.currentLevel || String(client?.character?.CurrentLevel?.name ?? '')) ||
+            LevelConfig.normalizeLevelName(detailLevel) ||
+            getScopeLevelName(detailScope);
+        if (!MissionHandler.isNephitQuestCompletionLevel(levelName)) {
+            return;
+        }
+
+        const logDetails: Record<string, unknown> = {
+            level: levelName,
+            character: client?.character?.name ?? null,
+            token: client?.token ?? null,
+            ...details
+        };
+        const serializedDetails = JSON.stringify(logDetails, (_key, value) => {
+            if (value instanceof Set) {
+                return Array.from(value.values());
+            }
+            if (value instanceof Map) {
+                return Object.fromEntries(value.entries());
+            }
+            return value;
+        });
+        console.log(`[NephitQuestCompletion] ${event} ${serializedDetails}`);
     }
 
     private static isRequiredDungeonBossEntity(levelName: string | null | undefined, entity: any): boolean {
-        return DungeonCompletionConditions.isRequiredBoss(levelName, entity);
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (!normalizedLevel) {
+            return true;
+        }
+
+        const bossNames = MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel];
+        if (bossNames) {
+            return Boolean(MissionHandler.getRequiredDungeonBossCanonicalName(normalizedLevel, entity));
+        }
+
+        if (GameData.hasDungeonBossEntities(normalizedLevel)) {
+            return GameData.isDungeonBossEntity(normalizedLevel, entity);
+        }
+
+        if (!MissionHandler.requiresBossDefeatForDungeon(normalizedLevel)) {
+            return true;
+        }
+
+        return MissionHandler.isDungeonCompletionBossEntity(entity);
     }
 
     private static isRequiredDungeonCompletionBossEntity(levelName: string | null | undefined, entity: any): boolean {
-        return DungeonCompletionConditions.isRequiredBoss(levelName, entity);
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        const entityName = MissionHandler.getEntityName(entity);
+        const bossNames = normalizedLevel
+            ? MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel]
+            : null;
+        if (bossNames?.has(entityName)) {
+            return true;
+        }
+        if (normalizedLevel && MissionHandler.getRequiredDungeonBossCanonicalName(normalizedLevel, entity)) {
+            return true;
+        }
+
+        if (normalizedLevel && GameData.hasDungeonBossEntities(normalizedLevel)) {
+            return GameData.isDungeonBossEntity(normalizedLevel, entity);
+        }
+
+        return MissionHandler.isDungeonCompletionBossEntity(entity) &&
+            MissionHandler.isRequiredDungeonBossEntity(levelName, entity);
     }
 
     static shouldProcessEnemyKillStateDungeonCompletion(client: Client, entity: any): boolean {
@@ -2868,34 +3767,34 @@ export class MissionHandler {
             !currentLevel ||
             !levelScope ||
             !LevelConfig.isDungeonLevel(currentLevel) ||
-            MissionHandler.hasFinalizedDungeonCompletion(client, levelScope)
+            currentLevel === 'TutorialBoat' ||
+            MissionHandler.hasFinalizedDungeonCompletion(client, levelScope) ||
+            client.forcedDungeonCompletionScope === levelScope
         ) {
             return false;
         }
 
-        const condition = DungeonCompletionConditions.get(currentLevel);
-        return Boolean(
-            condition &&
-            condition.mode !== 'disabled' &&
-            Boolean(entity?.clientSpawned) &&
-            (
-                condition.mode === 'full-clear' ||
-                DungeonCompletionConditions.isRequiredBoss(currentLevel, entity) ||
-                Boolean(DungeonCompletionConditions.getObjectiveRole(currentLevel, entity))
-            )
-        );
-    }
+        if (currentLevel === 'CraftTownTutorial') {
+            return MissionHandler.isCraftTownTutorialBossEntity(entity);
+        }
 
-    static isRequiredDungeonCompletionBossForLevel(levelName: string | null | undefined, entity: any): boolean {
-        return DungeonCompletionConditions.isRequiredBoss(levelName, entity);
-    }
-
-    static shouldIgnoreUnverifiedDungeonBossDefeat(levelName: string | null | undefined, entity: any): boolean {
-        if (!DungeonCompletionConditions.isRequiredBoss(levelName, entity)) {
+        if (!Boolean(entity?.clientSpawned)) {
             return false;
         }
 
-        if (!DungeonCompletionConditions.requiresBosses(levelName)) {
+        return MissionHandler.isRequiredDungeonCompletionBossEntity(currentLevel, entity);
+    }
+
+    static isRequiredDungeonCompletionBossForLevel(levelName: string | null | undefined, entity: any): boolean {
+        return MissionHandler.isRequiredDungeonCompletionBossEntity(levelName, entity);
+    }
+
+    static shouldIgnoreUnverifiedDungeonBossDefeat(levelName: string | null | undefined, entity: any): boolean {
+        if (!MissionHandler.isRequiredDungeonCompletionBossEntity(levelName, entity)) {
+            return false;
+        }
+
+        if (!MissionHandler.requiresCompletionBossDefeatForDungeon(levelName)) {
             return false;
         }
 
@@ -2912,7 +3811,7 @@ export class MissionHandler {
             // Some authored client-owned bosses stay at 1 HP on the server until
             // the Flash client emits its defeat signal. Higher HP is never a
             // verified boss death.
-            if (hp <= 1 && DungeonCompletionConditions.isClientAuthorityBoss(levelName, entity)) {
+            if (hp <= 1 && MissionHandler.isClientAuthorityRequiredBossDefeat(levelName, entity)) {
                 return false;
             }
 
@@ -2923,6 +3822,48 @@ export class MissionHandler {
             Boolean(entity?.dead) ||
             MissionHandler.isDefeatedEntityStateValue(Number(entity?.entState ?? EntityState.ACTIVE))
         );
+    }
+
+    private static isClientAuthorityRequiredBossDefeat(levelName: string | null | undefined, entity: any): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (!normalizedLevel || !MissionHandler.CLIENT_AUTHORITY_REQUIRED_BOSS_LEVELS.has(normalizedLevel)) {
+            return false;
+        }
+
+        const entityName = String(entity?.name ?? entity?.EntName ?? entity?.entName ?? '').trim();
+        return Boolean(entity?.clientSpawned) && MissionHandler.CLIENT_AUTHORITY_REQUIRED_BOSS_NAMES.has(entityName);
+    }
+
+    private static isRequiredDungeonChestEntity(levelName: string | null | undefined, entity: any): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (!normalizedLevel || !MissionHandler.requiresBossAndChestCompletionForDungeon(normalizedLevel)) {
+            return false;
+        }
+
+        const entityName = String(entity?.name ?? entity?.EntName ?? entity?.entName ?? '').trim();
+        const chestNames = MissionHandler.REQUIRED_DUNGEON_CHEST_NAMES_BY_LEVEL[normalizedLevel];
+        if (chestNames?.size) {
+            return chestNames.has(entityName);
+        }
+
+        const entType = entityName ? GameData.getEntType(entityName) ?? {} : {};
+        const behavior = String(entity?.Behavior ?? entity?.behavior ?? entType?.Behavior ?? entType?.behavior ?? '').trim();
+        return behavior === 'TreasureChest' || /questtreasurechest/i.test(entityName);
+    }
+
+    private static getDungeonCompletionObjectiveProgress(levelScope: string): DungeonCompletionObjectiveProgress {
+        let progress = MissionHandler.dungeonCompletionObjectiveProgress.get(levelScope);
+        if (!progress) {
+            progress = {
+                bossDefeated: false,
+                defeatedBossNames: new Set<string>(),
+                defeatedBossNameTimes: new Map<string, number>(),
+                bossRoomId: 0,
+                requiredChestDestroyed: false
+            };
+            MissionHandler.dungeonCompletionObjectiveProgress.set(levelScope, progress);
+        }
+        return progress;
     }
 
     private static getEntityName(entity: any): string {
@@ -2942,14 +3883,555 @@ export class MissionHandler {
         return '';
     }
 
+    private static normalizeRequiredBossNameKey(value: string | null | undefined): string {
+        return String(value ?? '')
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, '');
+    }
+
+    private static getRequiredDungeonBossCanonicalName(levelName: string | null | undefined, entity: any): string {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        const entityName = MissionHandler.getEntityName(entity);
+        if (!normalizedLevel || !entityName) {
+            return '';
+        }
+
+        const bossNames = MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel];
+        if (bossNames?.has(entityName)) {
+            return entityName;
+        }
+
+        const aliasMap = MissionHandler.REQUIRED_DUNGEON_BOSS_NAME_ALIASES_BY_LEVEL[normalizedLevel];
+        if (!aliasMap) {
+            return '';
+        }
+
+        const entityKey = MissionHandler.normalizeRequiredBossNameKey(entityName);
+        for (const [aliasName, canonicalName] of aliasMap.entries()) {
+            if (MissionHandler.normalizeRequiredBossNameKey(aliasName) === entityKey) {
+                return canonicalName;
+            }
+        }
+
+        return '';
+    }
+
     private static isDefeatedEntityStateValue(entState: number): boolean {
         return entState === EntityState.DEAD ||
             entState === MissionHandler.FLASH_DEFEATED_ENTITY_STATE;
     }
 
+    private static isDefeatedDungeonEntity(entity: any): boolean {
+        if (!entity) {
+            return false;
+        }
+
+        return Boolean(entity.dead) ||
+            MissionHandler.isDefeatedEntityStateValue(Number(entity.entState ?? EntityState.ACTIVE)) ||
+            Number(entity.hp ?? 1) <= 0;
+    }
+
+    private static requiresSimultaneousBossDefeatForDungeon(levelName: string | null | undefined): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        return Boolean(normalizedLevel && MissionHandler.DUNGEONS_REQUIRING_SIMULTANEOUS_BOSS_DEFEAT.has(normalizedLevel));
+    }
+
+    private static hasSimultaneousRequiredBossDefeat(
+        levelName: string | null | undefined,
+        progress: DungeonCompletionObjectiveProgress | undefined
+    ): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        const bossNames = normalizedLevel
+            ? MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel]
+            : null;
+        if (!bossNames?.size || !progress) {
+            return false;
+        }
+
+        const defeatedAt: number[] = [];
+        for (const bossName of bossNames) {
+            if (!progress.defeatedBossNames.has(bossName)) {
+                return false;
+            }
+            const timestamp = Math.max(0, Number(progress.defeatedBossNameTimes?.get(bossName) ?? 0));
+            if (timestamp <= 0) {
+                return false;
+            }
+            defeatedAt.push(timestamp);
+        }
+
+        return Math.max(...defeatedAt) - Math.min(...defeatedAt) <=
+            MissionHandler.SIMULTANEOUS_REQUIRED_BOSS_DEFEAT_WINDOW_MS;
+    }
+
+    private static hasCurrentDefeatedRequiredBossPair(
+        levelScope: string | null | undefined,
+        levelName: string | null | undefined
+    ): boolean {
+        const scopeKey = String(levelScope ?? '').trim();
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        const bossNames = normalizedLevel
+            ? MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel]
+            : null;
+        if (!scopeKey || !bossNames?.size || !MissionHandler.requiresSimultaneousBossDefeatForDungeon(normalizedLevel)) {
+            return false;
+        }
+
+        const levelMap = GlobalState.levelEntities.get(scopeKey);
+        if (!levelMap?.size) {
+            return false;
+        }
+
+        const currentlyDefeated = new Set<string>();
+        for (const entity of levelMap.values()) {
+            if (
+                !entity ||
+                entity.isPlayer ||
+                Number(entity.team ?? 0) !== EntityTeam.ENEMY
+            ) {
+                continue;
+            }
+
+            const entityName = MissionHandler.getEntityName(entity);
+            if (!bossNames.has(entityName)) {
+                continue;
+            }
+
+            if (MissionHandler.isAliveDungeonCompletionObjective(entity)) {
+                return false;
+            }
+
+            if (MissionHandler.isDefeatedDungeonEntity(entity)) {
+                currentlyDefeated.add(entityName);
+            }
+        }
+
+        for (const bossName of bossNames) {
+            if (!currentlyDefeated.has(bossName)) {
+                return false;
+            }
+        }
+
+        const progress = MissionHandler.getDungeonCompletionObjectiveProgress(scopeKey);
+        for (const bossName of bossNames) {
+            progress.defeatedBossNames.add(bossName);
+            progress.defeatedBossNameTimes.set(bossName, Date.now());
+        }
+        progress.bossDefeated = true;
+        return true;
+    }
+
+    private static hasDefeatedAllRequiredDungeonBossNames(
+        levelName: string | null | undefined,
+        progress: DungeonCompletionObjectiveProgress | undefined
+    ): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        const bossNames = normalizedLevel
+            ? MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel]
+            : null;
+        if (!bossNames?.size) {
+            return Boolean(progress?.bossDefeated);
+        }
+
+        if (!progress) {
+            return false;
+        }
+
+        if (MissionHandler.requiresSimultaneousBossDefeatForDungeon(normalizedLevel)) {
+            return MissionHandler.hasSimultaneousRequiredBossDefeat(normalizedLevel, progress);
+        }
+
+        for (const bossName of bossNames) {
+            if (!progress.defeatedBossNames.has(bossName)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static markRequiredDungeonBossDefeated(levelScope: string, levelName: string | null | undefined, entity: any): void {
+        const entityId = Math.max(0, Math.round(Number(entity?.id ?? 0)));
+        const scopedEntity = entityId > 0 ? GlobalState.levelEntities.get(levelScope)?.get(entityId) : null;
+        const entityName =
+            MissionHandler.getRequiredDungeonBossCanonicalName(levelName, entity) ||
+            MissionHandler.getRequiredDungeonBossCanonicalName(levelName, scopedEntity) ||
+            MissionHandler.getEntityName(entity) ||
+            MissionHandler.getEntityName(scopedEntity);
+        const isRequiredBoss = MissionHandler.isRequiredDungeonBossEntity(levelName, entity) ||
+            MissionHandler.isRequiredDungeonBossEntity(levelName, scopedEntity);
+        if (!isRequiredBoss ||
+            !MissionHandler.hasRequiredDungeonBossDefeatEvidence(levelName, entity, scopedEntity)) {
+            return;
+        }
+
+        const progress = MissionHandler.getDungeonCompletionObjectiveProgress(levelScope);
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        const bossNames = normalizedLevel
+            ? MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel]
+            : null;
+        if (entityName && !progress.defeatedBossNames.has(entityName)) {
+            progress.defeatedBossNames.add(entityName);
+            progress.defeatedBossNameTimes.set(entityName, Date.now());
+        }
+        if (bossNames?.size) {
+            progress.bossDefeated = MissionHandler.hasDefeatedAllRequiredDungeonBossNames(levelName, progress);
+        } else {
+            progress.bossDefeated = true;
+        }
+
+        if (scopedEntity && typeof scopedEntity === 'object') {
+            scopedEntity.dead = true;
+            scopedEntity.hp = 0;
+            scopedEntity.entState = EntityState.DEAD;
+        }
+
+        const roomId = MissionHandler.getEntityRoomId(entity);
+        if (roomId > 0) {
+            progress.bossRoomId = roomId;
+        }
+    }
+
+    private static hasRequiredDungeonBossDefeatEvidence(
+        levelName: string | null | undefined,
+        entity: any,
+        scopedEntity?: any
+    ): boolean {
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        if (normalizedLevel !== 'JC_Mission2' && normalizedLevel !== 'JC_Mission2Hard') {
+            return true;
+        }
+
+        if (!Boolean(entity?.clientSpawned) && !Boolean(scopedEntity?.clientSpawned)) {
+            return true;
+        }
+
+        return Boolean(entity?.playerDamageContributed || scopedEntity?.playerDamageContributed);
+    }
+
+    private static markRequiredDungeonChestDestroyed(levelScope: string): void {
+        MissionHandler.getDungeonCompletionObjectiveProgress(levelScope).requiredChestDestroyed = true;
+    }
+
+    private static hasRequiredDungeonChestDestroyed(levelScope: string | null | undefined): boolean {
+        const scopeKey = String(levelScope ?? '').trim();
+        return Boolean(scopeKey && MissionHandler.dungeonCompletionObjectiveProgress.get(scopeKey)?.requiredChestDestroyed);
+    }
+
+    private static hasMetRequiredDungeonCompletionObjectives(
+        client: Client | null,
+        levelName: string | null | undefined,
+        levelScope: string | null | undefined
+    ): boolean {
+        if (!MissionHandler.requiresBossAndChestCompletionForDungeon(levelName)) {
+            return MissionHandler.hasDefeatedDungeonBoss(client, levelScope) &&
+                !MissionHandler.hasAliveRequiredDungeonBossInCompletionRoom(levelScope, levelName);
+        }
+
+        return MissionHandler.hasDefeatedDungeonBoss(client, levelScope) &&
+            MissionHandler.hasRequiredDungeonChestDestroyed(levelScope);
+    }
+
+    private static canHonorForcedDungeonCompletion(
+        client: Client | null,
+        levelName: string | null | undefined,
+        levelScope: string | null | undefined,
+        allowLastHostileFallback: boolean
+    ): boolean {
+        if (!MissionHandler.requiresCompletionBossDefeatForDungeon(levelName)) {
+            return true;
+        }
+
+        if (MissionHandler.hasMetRequiredDungeonCompletionObjectives(client, levelName, levelScope)) {
+            return true;
+        }
+
+        if (MissionHandler.requiresBossAndChestCompletionForDungeon(levelName)) {
+            return false;
+        }
+
+        return Boolean(allowLastHostileFallback && levelScope && !MissionHandler.hasRemainingDungeonHostiles(levelScope));
+    }
+
+    private static isCraftTownTutorialBossEntity(entity: any): boolean {
+        const names = [
+            MissionHandler.getEntityName(entity),
+            String(entity?.characterName ?? '').trim(),
+            String(entity?.character_name ?? '').trim()
+        ];
+        return names.some((rawName) => {
+            const normalizedName = String(rawName ?? '').replace(/^,+/, '').trim();
+            return MissionHandler.CRAFT_TOWN_TUTORIAL_BOSS_NAMES.has(normalizedName);
+        });
+    }
+
+    private static shouldForceCompleteDungeonOnEnemyDefeat(levelScope: string, entity: any): boolean {
+        const levelName = getScopeLevelName(levelScope);
+        if (MissionHandler.DUNGEONS_WITH_CLIENT_SCRIPTED_COMPLETION.has(LevelConfig.normalizeLevelName(levelName))) {
+            return false;
+        }
+
+        if (MissionHandler.isFullClearOnlyDungeon(levelName)) {
+            return false;
+        }
+
+        if (MissionHandler.isRequiredDungeonCompletionBossEntity(levelName, entity)) {
+            if (MissionHandler.shouldIgnoreUnverifiedDungeonBossDefeat(levelName, entity)) {
+                return false;
+            }
+
+            MissionHandler.markRequiredDungeonBossDefeated(levelScope, levelName, entity);
+            return MissionHandler.hasMetRequiredDungeonCompletionObjectives(null, levelName, levelScope);
+        }
+
+        if (MissionHandler.isDungeonMiniBossEntity(entity)) {
+            return false;
+        }
+
+        if (
+            MissionHandler.requiresBossDefeatForDungeon(levelName) &&
+            !MissionHandler.isRequiredDungeonBossEntity(levelName, entity)
+        ) {
+            return false;
+        }
+
+        if (MissionHandler.requiresBossAndChestCompletionForDungeon(levelName)) {
+            return false;
+        }
+
+        return !MissionHandler.hasRemainingDungeonHostiles(levelScope);
+    }
+
     private static getEntityRoomId(entity: any): number {
         const roomId = Number(entity?.roomId ?? entity?.RoomID ?? entity?.room_id ?? 0);
         return Number.isFinite(roomId) && roomId > 0 ? Math.round(roomId) : 0;
+    }
+
+    private static isAliveDungeonCompletionObjective(entity: any): boolean {
+        if (!entity || entity.isPlayer) {
+            return false;
+        }
+
+        if (MissionHandler.isDefeatedDungeonEntity(entity)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static getCompletionBossRoomId(levelScope: string | null | undefined): number {
+        const scopeKey = String(levelScope ?? '').trim();
+        if (!scopeKey) {
+            return 0;
+        }
+
+        return Math.max(0, Number(MissionHandler.dungeonCompletionObjectiveProgress.get(scopeKey)?.bossRoomId ?? 0));
+    }
+
+    private static hasAliveRequiredDungeonBossInCompletionRoom(
+        levelScope: string | null | undefined,
+        levelName: string | null | undefined
+    ): boolean {
+        const scopeKey = String(levelScope ?? '').trim();
+        if (!scopeKey) {
+            return false;
+        }
+
+        const levelMap = GlobalState.levelEntities.get(scopeKey);
+        if (!levelMap?.size) {
+            return false;
+        }
+
+        const normalizedLevel = LevelConfig.normalizeLevelName(levelName);
+        const requiredBossNames = normalizedLevel
+            ? MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevel]
+            : null;
+        const allowDefeatedRequiredBossProxyCopies =
+            Boolean(normalizedLevel && MissionHandler.DUNGEONS_WITH_REQUIRED_BOSS_PROXY_COPIES.has(normalizedLevel));
+        const progress = MissionHandler.dungeonCompletionObjectiveProgress.get(scopeKey);
+        const bossRoomId = MissionHandler.getCompletionBossRoomId(scopeKey);
+        for (const entity of levelMap.values()) {
+            if (
+                entity &&
+                !entity.isPlayer &&
+                Number(entity.team ?? 0) === EntityTeam.ENEMY &&
+                MissionHandler.isRequiredDungeonCompletionBossEntity(levelName, entity) &&
+                MissionHandler.isAliveDungeonCompletionObjective(entity)
+            ) {
+                const canonicalName = allowDefeatedRequiredBossProxyCopies && requiredBossNames?.size
+                    ? MissionHandler.getRequiredDungeonBossCanonicalName(levelName, entity)
+                    : '';
+                if (canonicalName && progress?.defeatedBossNames.has(canonicalName)) {
+                    continue;
+                }
+
+                const entityRoomId = MissionHandler.getEntityRoomId(entity);
+                if (bossRoomId <= 0 || entityRoomId <= 0 || entityRoomId === bossRoomId) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static markRequiredBossNamesDefeatedFromRunStats(
+        levelScope: string,
+        levelName: string | null | undefined,
+        bossNames: ReadonlySet<string>
+    ): void {
+        const progress = MissionHandler.getDungeonCompletionObjectiveProgress(levelScope);
+        const now = Date.now();
+        for (const bossName of bossNames) {
+            progress.defeatedBossNames.add(bossName);
+            progress.defeatedBossNameTimes.set(bossName, now);
+        }
+        progress.bossDefeated = true;
+        MissionHandler.logNephitQuestCompletion('bossObjectiveRecoveredFromRunStats', null, {
+            levelScope,
+            levelName: LevelConfig.normalizeLevelName(levelName) || levelName,
+            bossNames: Array.from(bossNames.values()).join(',')
+        });
+    }
+
+    private static hasDefeatedDungeonBoss(client: Client | null, levelScope: string | null | undefined): boolean {
+        const scopeKey = String(levelScope ?? '').trim();
+        if (!scopeKey) {
+            return false;
+        }
+
+        const levelName = getScopeLevelName(scopeKey);
+        const normalizedLevelName = LevelConfig.normalizeLevelName(levelName) ?? levelName;
+        const requiredBossNames = normalizedLevelName
+            ? MissionHandler.REQUIRED_DUNGEON_BOSS_NAMES_BY_LEVEL[normalizedLevelName]
+            : undefined;
+        const requiresSimultaneousBossDefeat = MissionHandler.requiresSimultaneousBossDefeatForDungeon(levelName);
+        const progress = MissionHandler.dungeonCompletionObjectiveProgress.get(scopeKey);
+        if (!requiresSimultaneousBossDefeat && MissionHandler.hasDefeatedAllRequiredDungeonBossNames(levelName, progress)) {
+            return true;
+        }
+
+        const levelMap = GlobalState.levelEntities.get(scopeKey);
+        const bossCandidateEntities = new Map<number, any>();
+        for (const [entityId, entity] of levelMap?.entries() ?? []) {
+            bossCandidateEntities.set(entityId, entity);
+        }
+        for (const entity of client?.entities?.values?.() ?? []) {
+            const entityId = Math.max(0, Math.round(Number(entity?.id ?? entity?.entId ?? entity?.EntityID ?? 0)));
+            if (entityId > 0 && !bossCandidateEntities.has(entityId)) {
+                bossCandidateEntities.set(entityId, entity);
+            }
+        }
+
+        if (bossCandidateEntities.size) {
+            for (const entity of bossCandidateEntities.values()) {
+                if (
+                    requiresSimultaneousBossDefeat &&
+                    entity &&
+                    !entity.isPlayer &&
+                    Number(entity.team ?? 0) === EntityTeam.ENEMY &&
+                    MissionHandler.isRequiredDungeonCompletionBossEntity(levelName, entity) &&
+                    MissionHandler.isAliveDungeonCompletionObjective(entity)
+                ) {
+                    const entityName = MissionHandler.getEntityName(entity);
+                    if (entityName && progress) {
+                        progress.defeatedBossNames.delete(entityName);
+                        progress.defeatedBossNameTimes.delete(entityName);
+                        progress.bossDefeated = false;
+                    }
+                }
+
+                if (
+                    entity &&
+                    !entity.isPlayer &&
+                    Number(entity.team ?? 0) === EntityTeam.ENEMY &&
+                    MissionHandler.isRequiredDungeonCompletionBossEntity(levelName, entity) &&
+                    MissionHandler.isDefeatedDungeonEntity(entity)
+                ) {
+                    MissionHandler.markRequiredDungeonBossDefeated(scopeKey, levelName, entity);
+                    if (requiredBossNames?.size) {
+                        continue;
+                    }
+                    return true;
+                }
+            }
+
+            if (MissionHandler.hasDefeatedAllRequiredDungeonBossNames(
+                levelName,
+                MissionHandler.dungeonCompletionObjectiveProgress.get(scopeKey)
+            )) {
+                return true;
+            }
+
+            if (MissionHandler.hasCurrentDefeatedRequiredBossPair(scopeKey, levelName)) {
+                return true;
+            }
+        }
+
+        const stats = client ? getActiveDungeonRunStats(client) : null;
+        if (requiredBossNames?.size) {
+            if (
+                stats &&
+                stats.levelScope === scopeKey &&
+                stats.bossKilled &&
+                MissionHandler.isNephitQuestCompletionLevel(levelName)
+            ) {
+                MissionHandler.markRequiredBossNamesDefeatedFromRunStats(scopeKey, levelName, requiredBossNames);
+                return true;
+            }
+            return false;
+        }
+        return Boolean(stats && stats.levelScope === scopeKey && stats.bossKilled);
+    }
+
+    private static getDungeonBossDefeatAt(client: Client, levelScope: string | null | undefined): number {
+        const scopeKey = String(levelScope ?? '').trim();
+        if (!scopeKey) {
+            return 0;
+        }
+
+        const stats = getActiveDungeonRunStats(client);
+        if (!stats || stats.levelScope !== scopeKey || !stats.bossKilled) {
+            return 0;
+        }
+
+        return Math.max(0, Number(stats.bossDefeatTime ?? 0));
+    }
+
+    private static hasRemainingDungeonHostiles(levelScope: string): boolean {
+        const levelMap = GlobalState.levelEntities.get(levelScope);
+        if (!levelMap?.size) {
+            return false;
+        }
+
+        for (const candidate of levelMap.values()) {
+            if (MissionHandler.isAliveDungeonHostile(candidate)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static isAliveDungeonHostile(entity: any): boolean {
+        if (!entity || entity.isPlayer) {
+            return false;
+        }
+
+        if (Number(entity.team ?? 0) !== EntityTeam.ENEMY) {
+            return false;
+        }
+
+        if (Boolean(entity.untargetable)) {
+            return false;
+        }
+
+        if (MissionHandler.isDefeatedDungeonEntity(entity)) {
+            return false;
+        }
+
+        return true;
     }
 
     private static getMissionStateMap(character: Character): Record<string, MissionEntry> {
