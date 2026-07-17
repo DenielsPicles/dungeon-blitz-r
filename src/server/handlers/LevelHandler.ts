@@ -9,7 +9,6 @@ import { BitBuffer } from '../network/protocol/bitBuffer';
 import { BitReader } from '../network/protocol/bitReader';
 import { LevelConfig } from '../core/LevelConfig';
 import { GlobalState, PendingTransfer } from '../core/GlobalState';
-import { DebugLogger } from '../core/Debug';
 import {
     cloneDungeonRunStats,
     finalizeDungeonRun,
@@ -35,12 +34,10 @@ import { normalizeCharacterKey, PendingTeleport } from '../core/SocialState';
 import { TransferTokenAllocator } from '../core/TransferTokenAllocator';
 import { areClientsInSameParty, getPartyIdForClient, sharesRoomIds } from '../core/PartySync';
 import { syncPotionReservationForLevelTransition } from '../utils/ConsumableState';
-import { logJcMini1Authority } from '../utils/JcMini1AuthorityLog';
 import {
     getSharedDungeonInitialProgress,
     getOrCreateSharedDungeonProgressState,
     getSharedDungeonProgressState,
-    getSharedDungeonProgressTotals,
     hasSharedDungeonProgressHostiles,
     recomputeSharedDungeonProgress,
     resolveSharedDungeonProgressAuthorityToken,
@@ -57,6 +54,8 @@ import {
 import { markRoomBossEntity } from '../core/RoomBossState';
 import { getCharacterRuntimeLevel, getPartyRuntimeLevelForClient } from '../core/RuntimeLevel';
 import { getCraftTownHomeInstanceId } from '../utils/HomeVisitGuard';
+import { TutorialDungeonMechanics } from '../core/TutorialDungeonMechanics';
+import { DungeonCompletionSystem } from '../core/DungeonCompletionSystem';
 
 const db = new JsonAdapter();
 
@@ -107,23 +106,6 @@ type MissionWorkExecutorClient = Client & { socket?: unknown };
 type DungeonCutsceneRoomThoughtDelivery = 'level' | 'local' | 'suppress';
 
 export class LevelHandler {
-
-    private static logDungeonCutsceneSync(event: string, client: Client, details: Record<string, unknown> = {}): void {
-        if (String(process.env.DEBUG_CUTSCENE_SYNC ?? '').trim() !== '1') {
-            return;
-        }
-
-        console.log(
-            `[CutsceneSync][${event}] ` +
-            JSON.stringify({
-                character: String(client.character?.name ?? ''),
-                token: client.token,
-                scope: getClientLevelScope(client),
-                roomId: Number.isFinite(Number(client.currentRoomId)) ? Math.round(Number(client.currentRoomId)) : -1,
-                ...details
-            })
-        );
-    }
 
     private static deferMissionWork(client: Client, label: string, work: DeferredMissionWork): void {
         const executeWork = (): void => {
@@ -1129,20 +1111,6 @@ export class LevelHandler {
         return progress;
     }
 
-    private static buildSharedDungeonAutoCompletePayload(requiredKills: number): Buffer {
-        const bb = new BitBuffer(false);
-        bb.writeMethod9(100);
-        bb.writeMethod9(0);
-        bb.writeMethod9(0);
-        bb.writeMethod9(0);
-        bb.writeMethod9(0);
-        bb.writeMethod9(0);
-        bb.writeMethod9(0);
-        bb.writeMethod9(Math.max(1, requiredKills));
-        bb.writeMethod9(3);
-        return bb.toBuffer();
-    }
-
     private static maybeAutoCompleteSharedDungeon(levelScope: string, sharedState: any): void {
         if (!sharedState) {
             return;
@@ -1170,35 +1138,7 @@ export class LevelHandler {
             return;
         }
 
-        if (
-            sharedState.completionRequested &&
-            (
-                String(authorityClient.pendingDungeonCompletionScope ?? '').trim() === levelScope ||
-                String(authorityClient.completedDungeonCompletionScope ?? '').trim() === levelScope ||
-                String(authorityClient.finalizingDungeonCompletionScope ?? '').trim() === levelScope
-            )
-        ) {
-            return;
-        }
-
-        if (
-            LevelConfig.normalizeLevelName(authorityClient.currentLevel) === 'CraftTownTutorial' &&
-            !authorityClient.keepTutorialState?.bossDefeated
-        ) {
-            return;
-        }
-
-        if (!MissionHandler.canAutoCompleteSharedDungeon(authorityClient, levelScope)) {
-            return;
-        }
-
-        sharedState.completionRequested = true;
-        const requiredKills = Math.max(1, getSharedDungeonProgressTotals(levelScope).total);
-        MissionHandler.scheduleDungeonCompletion(
-            authorityClient,
-            LevelHandler.buildSharedDungeonAutoCompletePayload(requiredKills),
-            MissionHandler.getSharedDungeonAutoCompleteScheduleOptions(authorityClient, levelScope)
-        );
+        MissionHandler.noteSharedDungeonProgressComplete(levelScope, authorityClient);
         const refreshDelay = MissionHandler.DUNGEON_COMPLETION_SKIT_SETTLE_MS + 50;
         setTimeout(() => {
             recomputeSharedDungeonProgress(levelScope);
@@ -2651,9 +2591,6 @@ export class LevelHandler {
             delete missions[String(LevelHandler.FIRST_KEEP_MISSION_ID)].complete;
             client.character.missions = missions;
             client.character.questTrackerState = 0;
-            DebugLogger.logProgress('CraftTownTutorial:bootstrapMission', client, client.character, {
-                missionId: LevelHandler.FIRST_KEEP_MISSION_ID
-            });
 
             if (missionState === LevelHandler.MISSION_NOT_STARTED) {
                 LevelHandler.sendMissionAdded(client, LevelHandler.FIRST_KEEP_MISSION_ID);
@@ -3241,7 +3178,9 @@ export class LevelHandler {
                 completed: false,
                 startedAt: Date.now(),
                 endedAt: 0,
-                dialogIndex: 0
+                dialogIndex: 0,
+                participantKeys: new Set<string>(),
+                closedParticipantKeys: new Set<string>()
             }
         );
     }
@@ -3256,7 +3195,8 @@ export class LevelHandler {
             return false;
         }
 
-        return LevelHandler.hasSharedDungeonCutscenePeer(client);
+        return TutorialDungeonMechanics.isTutorialDungeon(client.currentLevel) ||
+            LevelHandler.hasSharedDungeonCutscenePeer(client);
     }
 
     private static beginSharedDungeonCutscene(
@@ -3306,7 +3246,7 @@ export class LevelHandler {
         return true;
     }
 
-    private static finishSharedDungeonCutscene(client: Client, roomId: number): 'not_shared' | 'finished' | 'active_duplicate' | 'completed_duplicate' {
+    private static finishSharedDungeonCutscene(client: Client, roomId: number): 'not_shared' | 'finished' | 'participant_finished' | 'active_duplicate' | 'completed_duplicate' {
         if (!LevelHandler.isSharedDungeonCutsceneScope(client)) {
             return 'not_shared';
         }
@@ -3330,7 +3270,20 @@ export class LevelHandler {
             }
             return 'completed_duplicate';
         }
-        if (existing?.active && existing.ownerToken > 0 && existing.ownerToken !== client.token) {
+        if (existing?.active && TutorialDungeonMechanics.isTutorialDungeon(levelScope)) {
+            const participantKey = DungeonCompletionSystem.getParticipantKey(client);
+            existing.participantKeys = existing.participantKeys ?? new Set<string>();
+            existing.closedParticipantKeys = existing.closedParticipantKeys ?? new Set<string>();
+            existing.participantKeys.add(participantKey);
+            existing.closedParticipantKeys.add(participantKey);
+            const waitingFor = [...existing.participantKeys]
+                .some((keyValue) => !existing.closedParticipantKeys?.has(keyValue));
+            if (waitingFor) {
+                return 'participant_finished';
+            }
+        }
+        if (existing?.active && existing.ownerToken > 0 && existing.ownerToken !== client.token &&
+            !TutorialDungeonMechanics.isTutorialDungeon(levelScope)) {
             return 'active_duplicate';
         }
 
@@ -3341,7 +3294,9 @@ export class LevelHandler {
             completed: true,
             startedAt: Math.max(0, Math.round(Number(existing?.startedAt ?? Date.now()) || Date.now())),
             endedAt: Date.now(),
-            dialogIndex: LevelHandler.getSharedDungeonCutsceneDialogIndex(existing)
+            dialogIndex: LevelHandler.getSharedDungeonCutsceneDialogIndex(existing),
+            participantKeys: existing?.participantKeys ?? new Set<string>(),
+            closedParticipantKeys: existing?.closedParticipantKeys ?? new Set<string>()
         });
         return 'finished';
     }
@@ -3448,8 +3403,11 @@ export class LevelHandler {
             Math.round(Number(joinedAtDialogIndex) || 0)
         );
         client.activeDungeonCutsceneLocalDialogIndex = 0;
+        const state = LevelHandler.getSharedDungeonCutsceneState(getClientLevelScope(client), roomId);
+        state?.participantKeys?.add(DungeonCompletionSystem.getParticipantKey(client));
         LevelHandler.markRoomEventStarted(client, roomId);
         MissionHandler.noteDungeonCutsceneStart(client, roomId);
+        EntityHandler.sendTutorialDungeonWorldSnapshot(client, 'cutscene_start');
     }
 
     private static sendSharedDungeonCutsceneStartToClient(
@@ -3619,17 +3577,14 @@ export class LevelHandler {
         }
 
         if (!LevelHandler.isSharedDungeonCutsceneParticipant(client, levelScope, resolvedRoomId)) {
-            LevelHandler.logDungeonCutsceneSync('thought-suppress-not-participant', client, { ...roomLogDetails, entityId, text });
             return 'suppress';
         }
         if (LevelHandler.isOtherPlayerRoomThoughtEntity(client, levelScope, entityId)) {
-            LevelHandler.logDungeonCutsceneSync('thought-suppress-other-player', client, { ...roomLogDetails, entityId, text });
             return 'suppress';
         }
 
         const activeState = LevelHandler.getSharedDungeonCutsceneState(levelScope, resolvedRoomId);
         if (!activeState?.active) {
-            LevelHandler.logDungeonCutsceneSync('thought-local-inactive-state', client, { ...roomLogDetails, entityId, text });
             return 'local';
         }
 
@@ -3639,12 +3594,6 @@ export class LevelHandler {
             }
             activeState.dialogIndex = LevelHandler.getSharedDungeonCutsceneDialogIndex(activeState) + 1;
             client.activeDungeonCutsceneLocalDialogIndex = activeState.dialogIndex;
-            LevelHandler.logDungeonCutsceneSync('thought-local-owner', client, {
-                ...roomLogDetails,
-                entityId,
-                dialogIndex: activeState.dialogIndex,
-                text
-            });
             return 'local';
         }
 
@@ -3658,23 +3607,8 @@ export class LevelHandler {
         );
         client.activeDungeonCutsceneLocalDialogIndex = localDialogIndex + 1;
         if (localDialogIndex < joinedAtDialogIndex) {
-            LevelHandler.logDungeonCutsceneSync('thought-suppress-stale-late-entrant', client, {
-                ...roomLogDetails,
-                entityId,
-                localDialogIndex,
-                joinedAtDialogIndex,
-                text
-            });
             return 'suppress';
         }
-
-        LevelHandler.logDungeonCutsceneSync('thought-local-late-entrant', client, {
-            ...roomLogDetails,
-            entityId,
-            localDialogIndex,
-            joinedAtDialogIndex,
-            text
-        });
         return 'local';
     }
 
@@ -4643,22 +4577,12 @@ export class LevelHandler {
         noteDungeonRunCompletionProgress(client, progress);
         MissionHandler.maybeScheduleFullClearDungeonCompletionFromProgress(client, progress);
 
-        DebugLogger.logProgress('QuestProgress:update', client, client.character, {
-            previousProgress,
-            requestedProgress,
-            progress
-        });
-
         if (client.character && client.userId && progress !== previousProgress) {
             if (typeof client.scheduleCharacterSave === 'function') {
                 LevelHandler.scheduleCurrentCharacterSnapshot(client, 'quest progress update');
             } else {
                 await LevelHandler.saveCurrentCharacterSnapshot(client);
             }
-            DebugLogger.logProgress('QuestProgress:saveQueued', client, client.character, {
-                previousProgress,
-                progress
-            });
         }
 
         if (usesSharedDungeonProgress(currentLevel) && levelScope) {
@@ -4689,6 +4613,7 @@ export class LevelHandler {
         const br = new BitReader(data);
         const roomId = br.readMethod9();
         LevelHandler.cacheRoomId(client, roomId);
+        EntityHandler.sendTutorialDungeonWorldSnapshot(client, 'room_state_ready');
         br.readMethod9();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
             return;
@@ -4722,10 +4647,6 @@ export class LevelHandler {
         br.readMethod15();
         const sharedCutsceneDecision = LevelHandler.beginSharedDungeonCutscene(client, roomId);
         if (sharedCutsceneDecision !== 'not_shared') {
-            LevelHandler.logDungeonCutsceneSync('room-start-decision', client, {
-                roomId,
-                decision: sharedCutsceneDecision
-            });
         }
         if (sharedCutsceneDecision === 'active_duplicate') {
             const state = LevelHandler.getSharedDungeonCutsceneState(getClientLevelScope(client), roomId);
@@ -4779,10 +4700,6 @@ export class LevelHandler {
         LevelHandler.cacheRoomId(client, roomId);
         const sharedCutsceneDecision = LevelHandler.finishSharedDungeonCutscene(client, roomId);
         if (sharedCutsceneDecision !== 'not_shared') {
-            LevelHandler.logDungeonCutsceneSync('room-close-decision', client, {
-                roomId,
-                decision: sharedCutsceneDecision
-            });
         }
         if (
             sharedCutsceneDecision === 'active_duplicate' ||
@@ -4790,8 +4707,19 @@ export class LevelHandler {
         ) {
             return;
         }
+        if (sharedCutsceneDecision === 'participant_finished') {
+            EntityHandler.sendTutorialDungeonWorldSnapshot(client, 'cutscene_participant_end');
+            client.activeDungeonCutsceneScope = '';
+            client.activeDungeonCutsceneRoomId = 0;
+            client.activeDungeonCutsceneJoinedAtDialogIndex = 0;
+            client.activeDungeonCutsceneLocalDialogIndex = 0;
+            return;
+        }
         if (sharedCutsceneDecision === 'finished') {
             LevelHandler.sendSharedDungeonCutsceneEndToParticipants(client, roomId, data);
+            for (const viewer of LevelHandler.forLevelRecipients(client, true)) {
+                EntityHandler.sendTutorialDungeonWorldSnapshot(viewer, 'cutscene_completed');
+            }
             LevelHandler.setServerAuthorityHostilesUntargetableForScope(getClientLevelScope(client), roomId, false);
             return;
         }
@@ -4817,6 +4745,7 @@ export class LevelHandler {
         LevelHandler.cacheRoomId(client, roomId);
         const bossId = br.readMethod9();
         const bossName = br.readMethod26();
+        TutorialDungeonMechanics.noteBossIntroStarted(client, bossId, bossName);
         br.readMethod9();
         br.readMethod26();
         if (LevelHandler.shouldSuppressSharedDungeonCutscenePacket(client, roomId)) {
@@ -4992,17 +4921,8 @@ export class LevelHandler {
 
         const doorContext = LevelHandler.getActiveDoorTravelContext(client, targetLevel);
         const syncState = LevelHandler.buildTransferSyncState(client, targetLevel, teleportOverride ?? null);
-
-        DebugLogger.logProgress('LevelTransfer:beforeSave', client, client.character, {
-            packetToken,
-            targetLevel
-        });
         await LevelHandler.saveCurrentCharacterSnapshot(client);
         await LevelHandler.refreshCurrentCharacterFromSave(client);
-        DebugLogger.logProgress('LevelTransfer:afterReload', client, client.character, {
-            packetToken,
-            targetLevel
-        });
 
         const activeCharacter = client.character;
         if (!activeCharacter) {
@@ -5121,23 +5041,6 @@ export class LevelHandler {
             craftTownOwnerToken
         );
 
-        DebugLogger.logProgress('EnterWorld:transferPacket', client, activeCharacter, {
-            previousLevel: oldLevel,
-            previousSwf: oldLevelSpec.swf,
-            targetLevel,
-            targetSwf: levelSpec.swf,
-            transferToken: newToken,
-            allocatedTransferToken: newToken,
-            syncAnchorToken: Number(syncState?.syncAnchorToken ?? 0) > 0
-                ? Math.round(Number(syncState?.syncAnchorToken))
-                : undefined,
-            packetToken,
-            effectivePreviousLevel,
-            newHasCoord,
-            newX,
-            newY
-        });
-
         client.sendBitBuffer(0x21, pkt);
     }
 
@@ -5182,9 +5085,6 @@ export class LevelHandler {
             const { CombatHandler } = require('./CombatHandler') as typeof import('./CombatHandler');
             entityId = CombatHandler.resolveClientHostileAliasForSharedState(client, getClientLevelScope(client), rawEntityId);
         }
-        console.log(
-            `[MultiplayerSync][alias-in] packet=0x07 source=${String(client.character?.name ?? '')} token=${client.token} rawId=${rawEntityId} canonicalId=${entityId}`
-        );
 
         // If it's us and we haven't spawned, ignore
         // In TS we don't track 'player_spawned' explicitly like python yet, but usually we can ignore.
@@ -5213,6 +5113,32 @@ export class LevelHandler {
         const levelEntity = LevelHandler.getCurrentLevelMap(client)?.get(entityId);
         const ent = client.entities.get(rawEntityId) ?? client.entities.get(entityId) ?? levelEntity;
         if (!ent) return;
+        const tutorialAuthority = TutorialDungeonMechanics.isTutorialDungeon(currentLevel)
+            ? TutorialDungeonMechanics.getAuthorityEntity(ent, Number(client.currentRoomId ?? 0))
+            : null;
+        if (
+            isDefeatEntState &&
+            tutorialAuthority &&
+            tutorialAuthority.role !== 'boss' &&
+            tutorialAuthority.role !== 'anna'
+        ) {
+            const transition = TutorialDungeonMechanics.commitClientObjectDefeat(client, ent);
+            if (transition.accepted && transition.authority) {
+                ent.dead = true;
+                ent.destroyed = true;
+                ent.hp = 0;
+                ent.entState = EntityState.DEAD;
+                EntityHandler.broadcastTutorialDungeonObjectTransition(client, transition.authority);
+                if (transition.authority.role === 'anna_chain') {
+                    void MissionHandler.handleForcedDungeonObjectiveCompletion(client, ent).catch((error) => {
+                        console.error('[GoblinKidnappersAuthority] anna_chain_completion_failed', error);
+                    });
+                }
+            } else if (transition.dedupe) {
+                EntityHandler.applyTutorialDungeonWorldSnapshotToLocalObject(client, ent, rawEntityId);
+            }
+            return;
+        }
         const isSelf =
             EntityHandler.isClientOwnPlayerEntity(client, getClientLevelScope(client), entityId, ent) ||
             EntityHandler.isClientOwnPlayerEntity(client, getClientLevelScope(client), rawEntityId, ent);
@@ -5270,9 +5196,6 @@ export class LevelHandler {
                 'terminal_entity_incremental_rejected',
                 rawEntityId
             );
-            console.log(
-                `[MultiplayerSync][post-death-drop] kind=entity-incremental scope=${getClientLevelScope(client)} targetId=${entityId} rawEntityId=${rawEntityId} sourceToken=${client.token} source=${String(client.character?.name ?? '')} hp=${Math.round(Number(canonicalEntity?.hp ?? 0))} dead=${Boolean(canonicalEntity?.dead)} destroyed=${Boolean(canonicalEntity?.destroyed)} entState=${canonicalEntity?.entState}`
-            );
             return;
         }
         if (
@@ -5306,20 +5229,7 @@ export class LevelHandler {
                     0
                 )
             );
-            console.log(
-                `[MultiplayerSync][alive-correction] canonicalId=${Math.max(0, Math.round(Number(canonicalEntity?.id ?? entityId) || 0))} localId=${rawEntityId} token=${client.token} hp=${canonicalHp}`
-            );
             const { CombatHandler } = require('./CombatHandler') as typeof import('./CombatHandler');
-            CombatHandler.logLootSync('predicted-death-no-loot', {
-                canonicalId: Math.max(0, Math.round(Number(canonicalEntity?.id ?? entityId) || 0)),
-                localId: rawEntityId,
-                token: client.token,
-                hp: canonicalHp,
-                reason: 'canonical_alive'
-            });
-            console.log(
-                `[MultiplayerSync][post-death-drop] kind=entity-incremental-predicted-death scope=${getClientLevelScope(client)} targetId=${entityId} rawEntityId=${rawEntityId} sourceToken=${client.token} source=${String(client.character?.name ?? '')} hp=${canonicalHp} dead=false destroyed=false entState=${canonicalEntity?.entState}`
-            );
             return;
         }
         const isServerAuthorityProxyUpdate =
@@ -5341,23 +5251,6 @@ export class LevelHandler {
                     hpCorrection.writeMethod4(rawEntityId);
                     hpCorrection.writeMethod45(-previousLocalHp);
                     client.sendBitBuffer(0x78, hpCorrection);
-                    logJcMini1Authority('authoritative_hp_correction', {
-                        packetId: '0x78',
-                        reason: 'dead_proxy_active_state_rejected',
-                        entityId,
-                        localEntityId: rawEntityId,
-                        viewer: client.character?.name ?? '',
-                        viewerToken: client.token,
-                        scope: getClientLevelScope(client),
-                        previousHp: previousLocalHp,
-                        expectedDamage: 0,
-                        expectedPostPacketHp: previousLocalHp,
-                        canonicalHp: 0,
-                        maxHp: correctionMaxHp,
-                        delta: -previousLocalHp,
-                        dead: true,
-                        entState: EntityState.DEAD
-                    });
                 }
                 if (levelEntity && typeof levelEntity === 'object') {
                     levelEntity.hp = 0;
@@ -5388,22 +5281,6 @@ export class LevelHandler {
                     isDefeatEntState ? 'dead_proxy_state_converge' : 'dead_proxy_active_state_rejected',
                     rawEntityId
                 );
-                logJcMini1Authority('proxy_state_relay', {
-                    packetId: '0x07',
-                    reason: isDefeatEntState ? 'dead_proxy_state_ignored' : 'dead_proxy_active_state_rejected',
-                    entityId,
-                    localEntityId: rawEntityId,
-                    source: client.character?.name ?? '',
-                    sourceToken: client.token,
-                    scope: getClientLevelScope(client),
-                    deltaX,
-                    deltaY,
-                    requestedEntState: entState,
-                    canonicalEntState: EntityState.DEAD,
-                    hp: 0,
-                    maxHp: Math.round(Number(levelEntity?.maxHp ?? ent?.maxHp ?? 0)),
-                    dead: true
-                });
                 return;
             }
             if (isDefeatEntState && !canonicalDead) {
@@ -5415,51 +5292,12 @@ export class LevelHandler {
                     'proxy_predicted_state_rejected',
                     rawEntityId
                 );
-                logJcMini1Authority('proxy_state_relay', {
-                    packetId: '0x07',
-                    reason: 'proxy_predicted_state_rejected',
-                    entityId,
-                    localEntityId: rawEntityId,
-                    source: client.character?.name ?? '',
-                    sourceToken: client.token,
-                    scope: getClientLevelScope(client),
-                    hp: Math.round(Number(levelEntity?.hp ?? 0)),
-                    maxHp: Math.round(Number(levelEntity?.maxHp ?? 0)),
-                    dead: Boolean(levelEntity?.dead),
-                    entState: levelEntity?.entState
-                });
                 return;
             }
 
             if (!EntityHandler.isServerAuthorityProxyOwner(client, levelEntity, rawEntityId)) {
-                logJcMini1Authority('proxy_state_relay', {
-                    packetId: '0x07',
-                    reason: 'follower_proxy_state_ignored',
-                    entityId,
-                    localEntityId: rawEntityId,
-                    source: client.character?.name ?? '',
-                    sourceToken: client.token,
-                    ownerToken: Math.round(Number(levelEntity?.proxyOwnerToken ?? 0)),
-                    scope: getClientLevelScope(client),
-                    deltaX,
-                    deltaY,
-                    entState
-                });
                 return;
             }
-
-            logJcMini1Authority('proxy_state_relay', {
-                packetId: '0x07',
-                reason: 'owner_proxy_state_relay',
-                entityId,
-                localEntityId: rawEntityId,
-                source: client.character?.name ?? '',
-                sourceToken: client.token,
-                scope: getClientLevelScope(client),
-                deltaX,
-                deltaY,
-                entState
-            });
         }
         const isAliasedSharedClientSpawnUpdate =
             rawEntityId !== entityId &&
@@ -5511,19 +5349,6 @@ export class LevelHandler {
                     )
                 );
                 if (currentLevel === 'JC_Mini1Hard') {
-                    logJcMini1Authority('client_spawn_dead_state_rejected', {
-                        packetId: '0x07',
-                        entityId,
-                        localEntityId: rawEntityId,
-                        source: client.character?.name ?? '',
-                        sourceToken: client.token,
-                        scope: getClientLevelScope(client),
-                        requestedEntState: entState,
-                        canonicalEntState: EntityState.DEAD,
-                        hp: 0,
-                        maxHp: Math.round(Number(levelEntity?.maxHp ?? ent?.maxHp ?? 0)),
-                        dead: true
-                    });
                 }
                 return;
             }
@@ -5568,11 +5393,6 @@ export class LevelHandler {
         }
         if (isEnemyEntity && isDefeatEntState) {
             const { CombatHandler } = require('./CombatHandler') as typeof import('./CombatHandler');
-            if (EntityHandler.shouldMirrorClientSpawnEntityToParty(currentLevel, levelEntity ?? ent)) {
-                console.log(
-                    `[MultiplayerSync][incremental-dead] scope=${getClientLevelScope(client)} source=${String(client.character?.name ?? '')} sourceToken=${client.token} rawEntityId=${rawEntityId} entityId=${entityId} name=${String((levelEntity ?? ent)?.name ?? '')} hp=${Math.round(Number((levelEntity ?? ent)?.hp ?? 0))} maxHp=${Math.round(Number((levelEntity ?? ent)?.maxHp ?? 0))}`
-                );
-            }
             const contributionSnapshot = CombatHandler.getContributionSnapshot(getClientLevelScope(client), entityId);
             if (contributionSnapshot.contributors.length) {
                 ent.clientDefeatVerified = true;
@@ -5680,6 +5500,7 @@ export class LevelHandler {
             canonicalIsDefeatState &&
             !Boolean(ent.questDefeatProcessed)
         ) {
+            const levelScope = getClientLevelScope(client);
             const shouldProcessMissionProgress = MissionHandler.shouldWaitForEnemyKillStateMissionProgress(client, ent);
             const shouldProcessDungeonCompletion = MissionHandler.shouldProcessEnemyKillStateDungeonCompletion(client, ent);
             if (shouldProcessMissionProgress || shouldProcessDungeonCompletion) {
@@ -5688,11 +5509,10 @@ export class LevelHandler {
                     LevelHandler.deferMissionWork(
                         client,
                         'enemy defeat mission progress',
-                        () => MissionHandler.handleEnemyDefeatMissionProgress(client, ent)
+                        () => MissionHandler.handleEnemyDefeatMissionProgressForScope(client, levelScope, ent)
                     );
                 }
 
-                const levelScope = getClientLevelScope(client);
                 const ownerToken = Math.round(Number(ent.ownerToken ?? 0));
                 const authorityToken = ownerToken > 0
                     ? ownerToken
@@ -5790,7 +5610,6 @@ export class LevelHandler {
                     velocityY
                 );
             if (isSharedClientSpawnEntity) {
-                EntityHandler.logAliasOutbound('0x07', other, entityId, localEntityId);
             }
             other.send(0x07, outboundData);
         }
